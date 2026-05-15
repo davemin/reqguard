@@ -1,0 +1,31 @@
+# Firewall backend used by reqguard commands run from systemd.
+# Valid values: auto, nftables, ufw
+REQGUARD_FIREWALL_BACKEND=auto
+
+# Persistent ban list path.
+REQGUARD_BANS_FILE=/var/lib/reqguard/bans.json
+
+# Country lookup provider.
+# Valid values: none, local, ipwhois, auto
+# local uses a local GeoIP database when available.
+# ipwhois calls REQGUARD_IP_LOOKUP_URL with rate limiting and cache.
+REQGUARD_COUNTRY_PROVIDER=ipwhois
+
+# Base URL for the ipwhois-compatible service.
+# If empty or invalid, reqguard uses https://ipwho.is
+# http:// URLs are allowed for internal services/proxies.
+REQGUARD_IP_LOOKUP_URL=https://ipwho.is
+
+# Persistent cache used by ipwhois provider.
+REQGUARD_COUNTRY_CACHE_FILE=/var/lib/reqguard/country-cache.json
+
+# TUI refresh interval. Values below 1.2 are clamped to 1.2 seconds.
+REQGUARD_REFRESH_SECONDS=1.2
+
+# Default monitor ordering.
+# Valid values: arrival, count-desc, count-asc
+REQGUARD_SORT=arrival
+
+# TCP ports blocked by bans created from web-monitor.
+# If omitted or invalid, reqguard uses 80,443.
+REQGUARD_WEB_BAN_PORTS=80,443

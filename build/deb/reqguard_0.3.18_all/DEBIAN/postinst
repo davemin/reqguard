@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -e
+
+CONFIG_FILE="/etc/default/reqguard"
+CONFIG_TEMPLATE="/usr/share/reqguard/reqguard.default"
+BACKUP_FILE="/var/lib/reqguard/reqguard.default.backup"
+
+mkdir -p "$(dirname "$CONFIG_FILE")" "/var/lib/reqguard"
+
+if [ -f "$CONFIG_FILE" ]; then
+  echo "reqguard: configuration file already exists: $CONFIG_FILE"
+  echo "reqguard: edit this file to change defaults."
+elif [ -f "$BACKUP_FILE" ]; then
+  install -m 0644 "$BACKUP_FILE" "$CONFIG_FILE"
+  echo "reqguard: restored existing configuration file: $CONFIG_FILE"
+  echo "reqguard: edit this file to change defaults."
+elif [ -f "$CONFIG_TEMPLATE" ]; then
+  install -m 0644 "$CONFIG_TEMPLATE" "$CONFIG_FILE"
+  echo "reqguard: created default configuration file: $CONFIG_FILE"
+  echo "reqguard: edit this file to change defaults."
+else
+  echo "reqguard: warning: default configuration template not found: $CONFIG_TEMPLATE" >&2
+fi
+
+rm -f "$BACKUP_FILE"
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi

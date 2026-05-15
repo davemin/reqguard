@@ -1,0 +1,12 @@
+[Unit]
+Description=Reqguard firewall ban list sync
+After=ufw.service nftables.service network-pre.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/reqguard
+ExecStart=/usr/bin/reqguard sync-firewall
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

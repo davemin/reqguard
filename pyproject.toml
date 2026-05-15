@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reqguard"
+version = "0.3.18"
+description = "Terminal request monitor with UFW/nftables IP banning for Ubuntu servers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "reqguard maintainers" }]
+keywords = ["security", "firewall", "nftables", "terminal", "monitoring"]
+classifiers = [
+  "Environment :: Console :: Curses",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Monitoring",
+  "Topic :: System :: Networking :: Firewalls",
+]
+
+[project.scripts]
+reqguard = "reqguard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
