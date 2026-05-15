@@ -4,7 +4,7 @@
 
 Il progetto nasce per lavorare via SSH, senza dashboard web e senza interfaccia grafica.
 
-Versione documentata: `0.3.19`.
+Versione documentata: `0.3.20`.
 
 ## Cosa Fa
 
@@ -347,9 +347,9 @@ cd /tmp/reqguard
 Distribuisci solo il `.deb` al server:
 
 ```bash
-scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.20_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 Verifica:
@@ -374,14 +374,14 @@ cd /tmp/reqguard
 2. Copia solo il pacchetto sul server di destinazione:
 
 ```bash
-scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.20_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il pacchetto sul server:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 4. Durante l'installazione il pacchetto controlla il file:
@@ -448,20 +448,20 @@ cd /tmp/reqguard
 2. Copia il nuovo `.deb` sul server:
 
 ```bash
-scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.20_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il nuovo `.deb`:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 Se stai reinstallando la stessa identica versione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 Il file `/etc/default/reqguard` non viene sovrascritto durante l'upgrade. I nuovi default del pacchetto vengono installati come template in:
@@ -478,7 +478,7 @@ diff -u /etc/default/reqguard /usr/share/reqguard/reqguard.default
 
 e aggiungi a `/etc/default/reqguard` solo le variabili che vuoi adottare.
 
-Per la versione `0.3.19` controlla in particolare questa variabile:
+Per la versione `0.3.20` controlla in particolare questa variabile:
 
 ```bash
 REQGUARD_WEB_BAN_PORTS=80,443
@@ -929,21 +929,21 @@ Su una macchina Ubuntu usata come build host:
 Output:
 
 ```text
-build/deb/reqguard_0.3.19_all.deb
+build/deb/reqguard_0.3.20_all.deb
 ```
 
 Installazione:
 
 ```bash
-scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.20_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 Se `apt` dice che e gia installato alla versione piu recente, incrementa la versione del pacchetto oppure forza la reinstallazione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.19_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.20_all.deb
 ```
 
 Nota architettura: il pacchetto e `Architecture: all`, quindi e indipendente dalla CPU. Puoi usare lo stesso `.deb` su x86_64, ARM64 o ARM se il sistema e Ubuntu/Linux compatibile e dispone delle dipendenze richieste.
@@ -963,6 +963,48 @@ In sintesi:
 - riavvia i monitor TUI aperti, perche non ricaricano la configurazione mentre sono gia in esecuzione.
 
 ## Troubleshooting
+
+### `sync-firewall` fallisce al boot
+
+Controlla il journal della unit:
+
+```bash
+sudo systemctl status reqguard-firewall.service --no-pager -l
+sudo journalctl -u reqguard-firewall.service -b --no-pager -o short-iso
+```
+
+Se vedi:
+
+```text
+error: no active firewall backend found
+```
+
+significa che al momento del boot `REQGUARD_FIREWALL_BACKEND=auto` non ha trovato UFW attivo ne `nft` disponibile. Verifica il backend:
+
+```bash
+sudo sed -n '1,80p' /etc/default/reqguard
+sudo ufw status verbose
+command -v ufw
+command -v nft
+```
+
+Se usi UFW, assicurati che sia attivo e abilitato al boot:
+
+```bash
+sudo ufw status
+sudo systemctl is-enabled ufw
+sudo systemctl enable ufw
+```
+
+Poi ricarica systemd e riprova:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart reqguard-firewall.service
+sudo systemctl status reqguard-firewall.service --no-pager -l
+```
+
+La unit `reqguard-firewall.service` include retry brevi su failure, cosi un avvio temporaneamente anticipato rispetto al firewall non lascia subito i ban non sincronizzati.
 
 ### UFW e inattivo
 

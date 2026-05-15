@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ROOT="$ROOT/build/deb"
-VERSION="0.3.19"
+VERSION="0.3.20"
 PKG_ROOT="$BUILD_ROOT/reqguard_${VERSION}_all"
 PYTHON_DIST="$PKG_ROOT/usr/lib/python3/dist-packages"
 
