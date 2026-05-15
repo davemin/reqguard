@@ -12,6 +12,7 @@ from .enrich import CountryLookup
 from .firewall import ban_ip, unban_ip
 from .models import BanEntry
 from .text import safe_terminal_text
+from .viewport import scroll_start_index
 from .weblog import WebGroup, WebLogReader, WebRequest, default_log_file, parse_datetime
 
 
@@ -330,8 +331,10 @@ class WebMonitorApp:
         stdscr.hline(5, 0, curses.ACS_HLINE, width - 1)
 
         list_bottom = max(6, height - 5)
+        row_heights = [self._display_row_height(item) for item in visible_rows]
+        start_index = scroll_start_index(row_heights, self.selected, list_bottom - 6)
         row = 6
-        for idx, item in enumerate(visible_rows):
+        for idx, item in enumerate(visible_rows[start_index:], start=start_index):
             if row >= list_bottom:
                 break
             if isinstance(item, BannedWebRow):
@@ -356,6 +359,20 @@ class WebMonitorApp:
                 row = self._draw_group_details(stdscr, row, width, list_bottom, detail_group)
         self._draw_selected_summary(stdscr, height, width, selected_row)
         stdscr.refresh()
+
+    def _display_row_height(self, item: WebGroup | BannedWebRow) -> int:
+        detail_group = item.group if isinstance(item, BannedWebRow) else item
+        if item.ip not in self.expanded or not detail_group:
+            return 1
+
+        detail_rows = 1
+        for request in detail_group.requests[:20]:
+            detail_rows += 1
+            if request.headers != "-":
+                detail_rows += 1
+            if request.payload != "-":
+                detail_rows += 1
+        return 1 + detail_rows
 
     def _draw_group_details(
         self,

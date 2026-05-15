@@ -4,7 +4,7 @@
 
 Il progetto nasce per lavorare via SSH, senza dashboard web e senza interfaccia grafica.
 
-Versione documentata: `0.3.18`.
+Versione documentata: `0.3.19`.
 
 ## Cosa Fa
 
@@ -347,9 +347,9 @@ cd /tmp/reqguard
 Distribuisci solo il `.deb` al server:
 
 ```bash
-scp build/deb/reqguard_0.3.18_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 Verifica:
@@ -374,14 +374,14 @@ cd /tmp/reqguard
 2. Copia solo il pacchetto sul server di destinazione:
 
 ```bash
-scp build/deb/reqguard_0.3.18_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il pacchetto sul server:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 4. Durante l'installazione il pacchetto controlla il file:
@@ -448,20 +448,20 @@ cd /tmp/reqguard
 2. Copia il nuovo `.deb` sul server:
 
 ```bash
-scp build/deb/reqguard_0.3.18_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il nuovo `.deb`:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 Se stai reinstallando la stessa identica versione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 Il file `/etc/default/reqguard` non viene sovrascritto durante l'upgrade. I nuovi default del pacchetto vengono installati come template in:
@@ -478,7 +478,7 @@ diff -u /etc/default/reqguard /usr/share/reqguard/reqguard.default
 
 e aggiungi a `/etc/default/reqguard` solo le variabili che vuoi adottare.
 
-Per la versione `0.3.18` controlla in particolare questa variabile:
+Per la versione `0.3.19` controlla in particolare questa variabile:
 
 ```bash
 REQGUARD_WEB_BAN_PORTS=80,443
@@ -929,21 +929,21 @@ Su una macchina Ubuntu usata come build host:
 Output:
 
 ```text
-build/deb/reqguard_0.3.18_all.deb
+build/deb/reqguard_0.3.19_all.deb
 ```
 
 Installazione:
 
 ```bash
-scp build/deb/reqguard_0.3.18_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.19_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 Se `apt` dice che e gia installato alla versione piu recente, incrementa la versione del pacchetto oppure forza la reinstallazione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.18_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.19_all.deb
 ```
 
 Nota architettura: il pacchetto e `Architecture: all`, quindi e indipendente dalla CPU. Puoi usare lo stesso `.deb` su x86_64, ARM64 o ARM se il sistema e Ubuntu/Linux compatibile e dispone delle dipendenze richieste.
