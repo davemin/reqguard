@@ -161,3 +161,14 @@ def test_monitor_search_and_country_filters_match_group_fields():
     filtered = tui.apply_monitor_group_filters(groups, tui.MonitorFilterState(search="scanner", country="US"))
 
     assert [group.ip for group in filtered] == ["203.0.113.9"]
+
+
+def test_monitor_view_cycle_includes_stats(tmp_path):
+    app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
+
+    app._toggle_view()
+    assert app.view_mode == tui.VIEW_BANS
+    app._toggle_view()
+    assert app.view_mode == tui.VIEW_STATS
+    app._toggle_view()
+    assert app.view_mode == tui.VIEW_REQUESTS

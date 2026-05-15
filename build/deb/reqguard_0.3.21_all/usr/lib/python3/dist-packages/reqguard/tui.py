@@ -2,26 +2,29 @@ from __future__ import annotations
 
 import curses
 import time
+from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
 
 from .banlist import BanList
 from .config import Config
-from .enrich import CountryLookup
+from .enrich import CountryLookup, reverse_dns
 from .firewall import ban_ip, unban_ip
-from .models import BanEntry
+from .models import BanEntry, Connection
+from .procnet import read_connections
+from .stats import CountryStat, TrafficStats, build_traffic_stats
 from .text import safe_terminal_text
 from .viewport import scroll_start_index
-from .weblog import WebGroup, WebLogReader, WebRequest, default_log_file, parse_datetime
 
 
-TITLE = "Reqguard web request monitor"
+TITLE = "Reqguard network monitor"
 HELP = "v/Tab view | / search | i IP | d date range | c country | x clear | s sort | b ban | u unban | q quit"
-DETAIL_COLUMNS = "    Seen                Method Path                                             Status  Host/User-Agent"
+DETAIL_COLUMNS = "    Seen                Remote endpoint           -> Local endpoint          State       Process"
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
 VIEW_BANS = "bans"
+VIEW_STATS = "stats"
+VIEW_MODES = (VIEW_REQUESTS, VIEW_BANS, VIEW_STATS)
 
 COLOR_HEADER = 1
 COLOR_LIVE = 2
@@ -32,7 +35,7 @@ COLOR_ERROR = 6
 
 
 @dataclass(frozen=True)
-class WebFilterState:
+class MonitorFilterState:
     search: str = ""
     ip: str = ""
     country: str = ""
@@ -42,9 +45,38 @@ class WebFilterState:
 
 
 @dataclass(frozen=True)
-class BannedWebRow:
+class IpGroup:
+    ip: str
+    count: int
+    connections: list[Connection]
+    country: str | None = None
+    hostname: str | None = None
+    banned: bool = False
+
+    @property
+    def last_seen_at(self) -> float:
+        return max((conn.observed_at for conn in self.connections), default=0.0)
+
+    @property
+    def last_seen(self) -> str:
+        latest = max(self.connections, key=lambda conn: conn.observed_at, default=None)
+        return latest.observed_time if latest else "-"
+
+    @property
+    def services(self) -> str:
+        ports = sorted({conn.local_port for conn in self.connections})
+        return ",".join(str(port) for port in ports[:6]) + ("..." if len(ports) > 6 else "")
+
+    @property
+    def processes(self) -> str:
+        names = sorted({conn.process for conn in self.connections if conn.process})
+        return ",".join(names[:3]) + ("..." if len(names) > 3 else "")
+
+
+@dataclass(frozen=True)
+class BannedIpRow:
     entry: BanEntry
-    group: WebGroup | None = None
+    group: IpGroup | None = None
     cached_country: str | None = None
 
     @property
@@ -72,20 +104,22 @@ class BannedWebRow:
         return self.group.last_seen if self.group else "-"
 
     @property
-    def latest_status(self) -> str:
-        return self.group.latest_status if self.group else "-"
+    def hostname(self) -> str | None:
+        return self.group.hostname if self.group else None
 
     @property
-    def top_paths(self) -> str:
-        return self.group.top_paths if self.group else "-"
+    def services(self) -> str:
+        return self.group.services if self.group else "-"
+
+    @property
+    def processes(self) -> str:
+        return self.group.processes if self.group else "-"
 
 
-class WebMonitorApp:
-    def __init__(self, config: Config, log_file: Path | None = None, max_events: int = 1000) -> None:
+class MonitorApp:
+    def __init__(self, config: Config) -> None:
         self.config = config
         self.banlist = BanList(config.bans_file)
-        self.log_file = log_file or default_log_file()
-        self.reader = WebLogReader(self.log_file, max_events=max_events)
         self.country_lookup = CountryLookup(
             config.geoip_db,
             config.country_provider,
@@ -94,9 +128,11 @@ class WebMonitorApp:
         )
         self.sort_mode = config.sort_mode
         self.view_mode = VIEW_REQUESTS
-        self.filters = WebFilterState()
+        self.filters = MonitorFilterState()
         self.selected = 0
         self.expanded: set[str] = set()
+        self.connection_seen: dict[tuple[str, str, int, str, int, str], tuple[float, str]] = {}
+        self.connection_history: list[Connection] = []
         self.message = ""
 
     def run(self) -> None:
@@ -112,14 +148,12 @@ class WebMonitorApp:
         stdscr.timeout(150)
         last_refresh = 0.0
         last_refresh_time = "-"
-        groups: list[WebGroup] = []
-        banned_rows: list[BannedWebRow] = []
-        visible_rows: list[WebGroup | BannedWebRow] = []
+        groups: list[IpGroup] = []
+        banned_rows: list[BannedIpRow] = []
+        visible_rows: list[IpGroup | BannedIpRow] = []
         while True:
             now = time.monotonic()
             if now - last_refresh >= self.config.refresh_seconds:
-                self.reader.wait_for_file(0)
-                self.reader.poll()
                 groups = self._groups()
                 banned_rows = self._banned_rows(groups)
                 visible_rows = self._visible_rows(groups, banned_rows)
@@ -165,7 +199,7 @@ class WebMonitorApp:
                 visible_rows = self._visible_rows(groups, banned_rows)
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("x"), ord("X")}:
-                self.filters = WebFilterState()
+                self.filters = MonitorFilterState()
                 self.message = "filters cleared"
                 groups = self._groups()
                 banned_rows = self._banned_rows(groups)
@@ -173,10 +207,7 @@ class WebMonitorApp:
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("s"), ord("S")}:
                 self._cycle_sort()
-                groups = self._groups()
-                banned_rows = self._banned_rows(groups)
-                visible_rows = self._visible_rows(groups, banned_rows)
-                self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
+                last_refresh = 0.0
             elif key in {ord("r"), ord("R")}:
                 last_refresh = 0.0
             elif key in {ord("b"), ord("B")} and visible_rows and self.view_mode == VIEW_REQUESTS:
@@ -186,33 +217,79 @@ class WebMonitorApp:
                 self._unban_ip(visible_rows[self.selected].ip)
                 last_refresh = 0.0
 
-    def _groups(self) -> list[WebGroup]:
-        banned_ips = set(self.banlist.load())
-        events = [event for event in self.reader.events if event_matches_filters(event, self.filters)]
-        groups = build_web_groups(events, banned_ips)
-        groups = [
-            replace(group, country=self.country_lookup.country(group.ip))
-            for group in groups
-        ]
-        groups = apply_group_filters(groups, self.filters)
-        return sort_web_groups(groups, self.sort_mode)
+    def _groups(self) -> list[IpGroup]:
+        bans = self.banlist.load()
+        by_ip: dict[str, list[Connection]] = defaultdict(list)
+        active_keys: set[tuple[str, str, int, str, int, str]] = set()
+        for conn in read_connections():
+            key = (
+                conn.protocol,
+                conn.local_ip,
+                conn.local_port,
+                conn.remote_ip,
+                conn.remote_port,
+                conn.inode,
+            )
+            active_keys.add(key)
+            is_new_connection = key not in self.connection_seen
+            if key not in self.connection_seen:
+                self.connection_seen[key] = (
+                    (conn.observed_at, conn.observed_time)
+                    if conn.observed_at > 0
+                    else current_observed_time()
+                )
+            observed_at, observed_time = self.connection_seen[key]
+            hostname = reverse_dns(conn.remote_ip) if self.config.reverse_dns else None
+            enriched = replace(
+                conn,
+                hostname=hostname,
+                country=self.country_lookup.country(conn.remote_ip),
+                banned=conn.remote_ip in bans,
+                observed_at=observed_at,
+                observed_time=observed_time,
+            )
+            if is_new_connection:
+                self.connection_history.append(enriched)
+            if connection_matches_filters(enriched, self.filters):
+                by_ip[enriched.remote_ip].append(enriched)
+        for key in set(self.connection_seen) - active_keys:
+            self.connection_seen.pop(key, None)
 
-    def _banned_rows(self, groups: list[WebGroup]) -> list[BannedWebRow]:
+        groups = [
+            IpGroup(
+                ip=ip,
+                count=len(connections),
+                connections=sorted(
+                    connections,
+                    key=lambda item: (-item.observed_at, item.local_port, item.remote_port, item.state),
+                ),
+                country=connections[0].country,
+                hostname=connections[0].hostname,
+                banned=ip in bans,
+            )
+            for ip, connections in by_ip.items()
+        ]
+        groups = apply_monitor_group_filters(groups, self.filters)
+        return sort_ip_groups(groups, self.sort_mode)
+
+    def _banned_rows(self, groups: list[IpGroup]) -> list[BannedIpRow]:
         group_by_ip = {group.ip: group for group in groups}
         rows = [
-            BannedWebRow(
+            BannedIpRow(
                 entry=entry,
                 group=group_by_ip.get(entry.ip),
                 cached_country=self.country_lookup.country(entry.ip),
             )
             for entry in self.banlist.load().values()
         ]
-        rows = [row for row in rows if banned_row_matches_filters(row, self.filters)]
+        rows = [row for row in rows if banned_ip_row_matches_filters(row, self.filters)]
         return sorted(rows, key=lambda row: (-(row.group.last_seen_at if row.group else 0), row.ip))
 
-    def _visible_rows(self, groups: list[WebGroup], banned_rows: list[BannedWebRow]) -> list[WebGroup | BannedWebRow]:
+    def _visible_rows(self, groups: list[IpGroup], banned_rows: list[BannedIpRow]) -> list[IpGroup | BannedIpRow]:
         if self.view_mode == VIEW_BANS:
             return banned_rows
+        if self.view_mode == VIEW_STATS:
+            return []
         return [group for group in groups if not group.banned]
 
     def _toggle(self, ip: str) -> None:
@@ -227,12 +304,13 @@ class WebMonitorApp:
         self.message = f"sort changed to {self.sort_mode}"
 
     def _toggle_view(self) -> None:
-        self.view_mode = VIEW_BANS if self.view_mode == VIEW_REQUESTS else VIEW_REQUESTS
+        index = VIEW_MODES.index(self.view_mode) if self.view_mode in VIEW_MODES else 0
+        self.view_mode = VIEW_MODES[(index + 1) % len(VIEW_MODES)]
         self.selected = 0
         self.message = f"view changed to {self.view_mode}"
 
     def _set_search(self, stdscr: curses.window) -> None:
-        value = self._prompt(stdscr, "Search IP/date/top path (empty clears): ")
+        value = self._prompt(stdscr, "Search IP/date/country/host/ports (empty clears): ")
         self.filters = replace(self.filters, search=value)
         self.message = f"search set to {value}" if value else "search cleared"
 
@@ -275,23 +353,21 @@ class WebMonitorApp:
             stdscr.nodelay(True)
         return raw.decode("utf-8", errors="replace").strip()
 
-    def _ban(self, group: WebGroup) -> None:
-        ports = self.config.web_ban_ports
+    def _ban(self, group: IpGroup) -> None:
         try:
-            ban_ip(group.ip, backend=self.config.firewall_backend, ports=ports)
+            ban_ip(group.ip, backend=self.config.firewall_backend)
             try:
-                self.banlist.add(group.ip, reason=f"manual from web-monitor count={group.count}", ports=ports)
+                self.banlist.add(group.ip, reason=f"manual from monitor count={group.count}")
             except Exception:
-                unban_ip(group.ip, backend=self.config.firewall_backend, ports=ports)
+                unban_ip(group.ip, backend=self.config.firewall_backend)
                 raise
-            self.message = f"banned {group.ip} on ports {','.join(str(port) for port in ports)}"
+            self.message = f"banned {group.ip}"
         except Exception as exc:
             self.message = f"ban failed: {exc}"
 
     def _unban_ip(self, ip: str) -> None:
         try:
-            entry = self.banlist.load().get(ip)
-            unban_ip(ip, backend=self.config.firewall_backend, ports=entry.ports if entry else None)
+            unban_ip(ip, backend=self.config.firewall_backend)
             self.banlist.remove(ip)
             self.message = f"unbanned {ip}"
         except Exception as exc:
@@ -300,32 +376,41 @@ class WebMonitorApp:
     def _draw(
         self,
         stdscr: curses.window,
-        groups: list[WebGroup],
-        banned_rows: list[BannedWebRow],
-        visible_rows: list[WebGroup | BannedWebRow],
+        groups: list[IpGroup],
+        banned_rows: list[BannedIpRow],
+        visible_rows: list[IpGroup | BannedIpRow],
         last_refresh_time: str,
     ) -> None:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        if height < 8 or width < 82:
-            stdscr.addnstr(0, 0, "Terminal too small for web monitor. Resize to at least 82x8.", width - 1)
+        if height < 8 or width < 72:
+            stdscr.addnstr(0, 0, "Terminal too small for reqguard. Resize to at least 72x8.", width - 1)
             stdscr.refresh()
             return
+
+        history_groups = self._history_groups() if self.view_mode == VIEW_STATS else []
+        stats = self._stats(history_groups) if self.view_mode == VIEW_STATS else None
+        total_connections = stats.total if stats else sum(item.count for item in visible_rows)
         selected_row = visible_rows[self.selected] if visible_rows else None
-        visible_ip_count = len(visible_rows)
-        visible_total_requests = sum(item.count for item in visible_rows)
-        self._draw_header(stdscr, width, visible_ip_count, visible_total_requests, len(banned_rows), last_refresh_time)
+
+        ip_count = stats.unique_ips if stats else len(visible_rows)
+        self._draw_header(stdscr, width, len(banned_rows), ip_count, total_connections, last_refresh_time)
         if self.message:
             attr = self._color(COLOR_ERROR if "failed" in self.message else COLOR_STATUS)
             stdscr.addnstr(2, 0, f"Last action: {safe_terminal_text(self.message)}", width - 1, attr)
         else:
-            stdscr.addnstr(2, 0, f"Log: {safe_terminal_text(self.log_file)}", width - 1, self._color(COLOR_DETAIL))
+            stdscr.addnstr(2, 0, "Last action: none", width - 1, self._color(COLOR_DETAIL))
         stdscr.addnstr(3, 0, self._filter_summary().ljust(width - 1), width - 1, self._color(COLOR_DETAIL))
 
+        if self.view_mode == VIEW_STATS:
+            self._draw_stats(stdscr, width, height, stats)
+            stdscr.refresh()
+            return
+
         columns = (
-            "Status  Last seen           IP remoto          Country   Req   Response Code  Top path"
+            "Status  Last seen           IP remoto          Conn  Country   Hostname/Server                 Porte locali"
             if self.view_mode == VIEW_REQUESTS
-            else "Created at                 IP remoto          Country   Req   Response Code  Top path / Reason"
+            else "Created at                 IP remoto          Conn  Country   Hostname/Reason                 Porte locali"
         )
         stdscr.addnstr(4, 0, columns, width - 1, curses.A_BOLD)
         stdscr.hline(5, 0, curses.ACS_HLINE, width - 1)
@@ -337,42 +422,135 @@ class WebMonitorApp:
         for idx, item in enumerate(visible_rows[start_index:], start=start_index):
             if row >= list_bottom:
                 break
-            if isinstance(item, BannedWebRow):
+            if isinstance(item, BannedIpRow):
                 attr = self._banned_row_attr(idx == self.selected)
                 marker = "-" if item.ip in self.expanded else "+"
+                country = safe_terminal_text(item.country or "--")
+                host_or_reason = safe_terminal_text(item.hostname or item.reason)
                 line = (
-                    f"{marker} {safe_terminal_text(item.created_at):<24.24} {item.ip:<18} "
-                    f"{safe_terminal_text(item.country or '--'):<8} {item.count:<5} "
-                    f"{safe_terminal_text(item.latest_status):<5} {safe_terminal_text(item.top_paths if item.group else item.reason):<90.90}"
+                    f"{marker} {safe_terminal_text(item.created_at):<24.24} {item.ip:<18} {item.count:<5} {country:<8} "
+                    f"{host_or_reason:<31.31} {safe_terminal_text(item.services):<16.16}"
                 )
             else:
                 attr = self._group_attr(item, idx == self.selected)
                 marker = "-" if item.ip in self.expanded else "+"
+                country = safe_terminal_text(item.country or "--")
+                host = safe_terminal_text(item.hostname or "-")
                 line = (
-                    f"LIVE   {marker} {item.last_seen:<19} {item.ip:<18} {safe_terminal_text(item.country or '--'):<8} {item.count:<5} "
-                    f"{safe_terminal_text(item.latest_status):<5} {safe_terminal_text(item.top_paths or '-'):<80.80}"
+                    f"LIVE   {marker} {item.last_seen:<19} {item.ip:<18} {item.count:<5} {country:<8} "
+                    f"{host:<31.31} {safe_terminal_text(item.services):<16.16}"
                 )
             stdscr.addnstr(row, 0, line, width - 1, attr)
             row += 1
-            detail_group = item.group if isinstance(item, BannedWebRow) else item
+            detail_group = item.group if isinstance(item, BannedIpRow) else item
             if item.ip in self.expanded and detail_group:
                 row = self._draw_group_details(stdscr, row, width, list_bottom, detail_group)
         self._draw_selected_summary(stdscr, height, width, selected_row)
         stdscr.refresh()
 
-    def _display_row_height(self, item: WebGroup | BannedWebRow) -> int:
-        detail_group = item.group if isinstance(item, BannedWebRow) else item
+    def _history_groups(self) -> list[IpGroup]:
+        bans = self.banlist.load()
+        by_ip: dict[str, list[Connection]] = defaultdict(list)
+        for conn in self.connection_history:
+            refreshed = replace(
+                conn,
+                country=self.country_lookup.country(conn.remote_ip),
+                banned=conn.remote_ip in bans,
+            )
+            if connection_matches_filters(refreshed, self.filters):
+                by_ip[refreshed.remote_ip].append(refreshed)
+        groups = [
+            IpGroup(
+                ip=ip,
+                count=len(connections),
+                connections=sorted(connections, key=lambda item: (-item.observed_at, item.local_port, item.remote_port)),
+                country=connections[0].country,
+                hostname=connections[0].hostname,
+                banned=ip in bans,
+            )
+            for ip, connections in by_ip.items()
+        ]
+        return apply_monitor_group_filters(groups, self.filters)
+
+    def _stats(self, history_groups: list[IpGroup]) -> TrafficStats:
+        bans = self.banlist.load()
+        banned_rows = self._banned_rows(history_groups)
+        observations = [
+            (conn.remote_ip, group.country)
+            for group in history_groups
+            for conn in group.connections
+        ]
+        return build_traffic_stats(
+            observations,
+            set(bans),
+            [row.country for row in banned_rows],
+        )
+
+    def _draw_stats(
+        self,
+        stdscr: curses.window,
+        width: int,
+        height: int,
+        stats: TrafficStats | None,
+    ) -> None:
+        if stats is None:
+            return
+        row = 4
+        stdscr.addnstr(row, 0, "Metriche sessione", width - 1, curses.A_BOLD)
+        row += 1
+        stdscr.hline(row, 0, curses.ACS_HLINE, width - 1)
+        row += 1
+        lines = [
+            f"Connessioni osservate: {stats.total}",
+            f"IP unici osservati: {stats.unique_ips}",
+            f"Connessioni LIVE/non bannate: {stats.live}",
+            f"Connessioni da IP bannati: {stats.banned}",
+            f"Ban persistenti: {stats.persisted_bans}",
+        ]
+        for line in lines:
+            if row >= height - 1:
+                break
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_STATUS))
+            row += 1
+
+        row += 1
+        row = self._draw_country_stats(stdscr, row, width, height, "Connessioni per country", stats.countries)
+        row += 1
+        self._draw_country_stats(stdscr, row, width, height, "Country piu bannati", stats.banned_countries)
+        stdscr.addnstr(height - 1, 0, HELP.ljust(width - 1), width - 1, curses.A_REVERSE)
+
+    def _draw_country_stats(
+        self,
+        stdscr: curses.window,
+        row: int,
+        width: int,
+        height: int,
+        title: str,
+        countries: list[CountryStat],
+    ) -> int:
+        if row >= height - 1:
+            return row
+        stdscr.addnstr(row, 0, title, width - 1, curses.A_BOLD)
+        row += 1
+        if row < height - 1:
+            stdscr.addnstr(row, 0, "Country   Count   IP unici   Da IP bannati", width - 1, curses.A_DIM)
+            row += 1
+        for item in countries[:10]:
+            if row >= height - 1:
+                break
+            line = f"{safe_terminal_text(item.country):<9} {item.count:<7} {item.unique_ips:<9} {item.banned_count:<13}"
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        if not countries and row < height - 1:
+            stdscr.addnstr(row, 0, "-", width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        return row
+
+    def _display_row_height(self, item: IpGroup | BannedIpRow) -> int:
+        detail_group = item.group if isinstance(item, BannedIpRow) else item
         if item.ip not in self.expanded or not detail_group:
             return 1
-
-        detail_rows = 1
-        for request in detail_group.requests[:20]:
-            detail_rows += 1
-            if request.headers != "-":
-                detail_rows += 1
-            if request.payload != "-":
-                detail_rows += 1
-        return 1 + detail_rows
+        return 2 + len(detail_group.connections)
 
     def _draw_group_details(
         self,
@@ -380,44 +558,39 @@ class WebMonitorApp:
         row: int,
         width: int,
         height: int,
-        group: WebGroup,
+        group: IpGroup,
     ) -> int:
         if row < height:
             stdscr.addnstr(row, 0, DETAIL_COLUMNS, width - 1, curses.A_DIM)
             row += 1
-        for request in group.requests[:20]:
+        for conn in group.connections:
             if row >= height:
                 break
-            host = safe_terminal_text(request.host if request.host != "-" else request.user_agent)
-            line = (
-                f"    {request.observed_time:<19} {safe_terminal_text(request.method):<6} "
-                f"{safe_terminal_text(request.path):<48.48} {safe_terminal_text(request.status):<7} {host:<50.50}"
+            local = f"{conn.local_ip}:{conn.local_port}"
+            remote = f"{conn.remote_ip}:{conn.remote_port}"
+            proc = safe_terminal_text(f"{conn.process or '-'}" + (f"[{conn.pid}]" if conn.pid else ""))
+            detail = (
+                f"    {conn.observed_time:<19} {safe_terminal_text(remote):<24.24} -> "
+                f"{safe_terminal_text(local):<22.22} {safe_terminal_text(conn.state):<11.11} {proc:<18.18}"
             )
-            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_DETAIL))
+            stdscr.addnstr(row, 0, detail, width - 1, self._color(COLOR_DETAIL))
             row += 1
-            if request.headers != "-" and row < height:
-                headers = safe_terminal_text(request.headers)
-                stdscr.addnstr(row, 0, f"      headers: {headers:<90.90}", width - 1, self._color(COLOR_DETAIL))
-                row += 1
-            if request.payload != "-" and row < height:
-                payload = safe_terminal_text(request.payload)
-                stdscr.addnstr(row, 0, f"      payload: {payload:<90.90}", width - 1, self._color(COLOR_DETAIL))
-                row += 1
         return row
 
     def _draw_header(
         self,
         stdscr: curses.window,
         width: int,
+        bans_count: int,
         ip_count: int,
-        total_requests: int,
-        banned_count: int,
+        total_connections: int,
         last_refresh_time: str,
     ) -> None:
-        stdscr.addnstr(0, 0, f" {TITLE} ".ljust(width - 1), width - 1, self._color(COLOR_HEADER) | curses.A_BOLD)
+        title = f" {TITLE} "
+        stdscr.addnstr(0, 0, title.ljust(width - 1), width - 1, self._color(COLOR_HEADER) | curses.A_BOLD)
         stats = (
-            f"View: {self.view_mode}   IPs shown: {ip_count}   HTTP requests shown: {total_requests}   "
-            f"Persisted bans shown: {banned_count}/{len(self.banlist.load())}   Sort: {self.sort_mode}   "
+            f"View: {self.view_mode}   IPs shown: {ip_count}   Active TCP connections shown: {total_connections}   "
+            f"Persisted bans shown: {bans_count}/{len(self.banlist.load())}   Sort: {self.sort_mode}   "
             f"Last refresh: {last_refresh_time}"
         )
         stdscr.addnstr(1, 0, stats, width - 1, self._color(COLOR_STATUS))
@@ -439,30 +612,32 @@ class WebMonitorApp:
         stdscr: curses.window,
         height: int,
         width: int,
-        item: WebGroup | BannedWebRow | None,
+        item: IpGroup | BannedIpRow | None,
     ) -> None:
         top = height - 4
         stdscr.hline(top, 0, curses.ACS_HLINE, width - 1)
         if not item:
-            message = f"No rows in {self.view_mode} view. Waiting for log file or adjust filters: {self.log_file}"
-            stdscr.addnstr(top + 1, 0, message, width - 1)
-        elif isinstance(item, BannedWebRow):
+            stdscr.addnstr(top + 1, 0, f"No rows in {self.view_mode} view. Waiting for traffic or adjust filters.", width - 1)
+        elif isinstance(item, BannedIpRow):
             expanded = "expanded" if item.ip in self.expanded else "collapsed"
             summary = (
-                f"Selected ban: {item.ip}   Created: {item.created_at}   Requests in filters: {item.count}   "
+                f"Selected ban: {item.ip}   Created: {item.created_at}   Active connections in filters: {item.count}   "
                 f"Country: {item.country or '--'}   View: {expanded}"
             )
             stdscr.addnstr(top + 1, 0, summary, width - 1, self._color(COLOR_BANNED))
-            detail = f"Reason: {safe_terminal_text(item.reason)}"
+            detail = f"Reason: {safe_terminal_text(item.reason)}   Hostname: {safe_terminal_text(item.hostname or '-')}"
             stdscr.addnstr(top + 2, 0, detail, width - 1, self._color(COLOR_DETAIL))
         else:
             expanded = "expanded" if item.ip in self.expanded else "collapsed"
             summary = (
-                f"Selected: {item.ip} [LIVE]   Requests: {item.count}   "
+                f"Selected: {item.ip} [LIVE]   Connections: {item.count}   "
                 f"Last seen: {item.last_seen}   Country: {item.country or '--'}   View: {expanded}"
             )
             stdscr.addnstr(top + 1, 0, summary, width - 1, self._group_attr(item, False))
-            detail = f"Latest user-agent: {safe_terminal_text(item.latest_user_agent)}"
+            host = safe_terminal_text(item.hostname or "-")
+            ports = safe_terminal_text(item.services or "-")
+            procs = safe_terminal_text(item.processes or "-")
+            detail = f"Hostname: {host}   Local ports: {ports}   Processes: {procs}"
             stdscr.addnstr(top + 2, 0, detail, width - 1, self._color(COLOR_DETAIL))
         stdscr.addnstr(height - 1, 0, HELP.ljust(width - 1), width - 1, curses.A_REVERSE)
 
@@ -483,7 +658,7 @@ class WebMonitorApp:
             return curses.A_NORMAL
         return curses.color_pair(pair)
 
-    def _group_attr(self, group: WebGroup, selected: bool) -> int:
+    def _group_attr(self, group: IpGroup, selected: bool) -> int:
         attr = self._color(COLOR_BANNED if group.banned else COLOR_LIVE)
         if selected:
             attr |= curses.A_REVERSE
@@ -496,11 +671,20 @@ class WebMonitorApp:
         return attr
 
 
-def run_web_monitor(config: Config, log_file: Path | None = None, max_events: int = 1000) -> None:
-    WebMonitorApp(config, log_file=log_file, max_events=max_events).run()
+def run_monitor(config: Config) -> None:
+    MonitorApp(config).run()
 
 
-def sort_web_groups(groups: list[WebGroup], sort_mode: str) -> list[WebGroup]:
+def current_observed_time() -> tuple[float, str]:
+    now = datetime.now().astimezone()
+    return now.timestamp(), now.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def current_display_time() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def sort_ip_groups(groups: list[IpGroup], sort_mode: str) -> list[IpGroup]:
     if sort_mode == "count-desc":
         return sorted(groups, key=lambda item: (-item.count, -item.last_seen_at, item.ip))
     if sort_mode == "count-asc":
@@ -508,59 +692,41 @@ def sort_web_groups(groups: list[WebGroup], sort_mode: str) -> list[WebGroup]:
     return sorted(groups, key=lambda item: (-item.last_seen_at, item.ip))
 
 
-def current_display_time() -> str:
-    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def build_web_groups(events: list[WebRequest], banned_ips: set[str]) -> list[WebGroup]:
-    grouped: dict[str, list[WebRequest]] = {}
-    for event in events:
-        grouped.setdefault(event.ip, []).append(event)
-    return [
-        WebGroup(
-            ip=ip,
-            count=len(requests),
-            requests=sorted(requests, key=lambda request: -request.observed_at),
-            banned=ip in banned_ips,
-        )
-        for ip, requests in grouped.items()
-    ]
-
-
-def event_matches_filters(event: WebRequest, filters: WebFilterState) -> bool:
-    if filters.ip and event.ip != filters.ip:
+def connection_matches_filters(conn: Connection, filters: MonitorFilterState) -> bool:
+    if filters.ip and conn.remote_ip != filters.ip:
         return False
-    if filters.start_at is not None and event.observed_at < filters.start_at:
+    if filters.start_at is not None and conn.observed_at < filters.start_at:
         return False
-    if filters.end_at is not None and event.observed_at > filters.end_at:
+    if filters.end_at is not None and conn.observed_at > filters.end_at:
         return False
     return True
 
 
-def apply_group_filters(groups: list[WebGroup], filters: WebFilterState) -> list[WebGroup]:
+def apply_monitor_group_filters(groups: list[IpGroup], filters: MonitorFilterState) -> list[IpGroup]:
     result = groups
     if filters.country:
         result = [group for group in result if (group.country or "").upper() == filters.country]
     if filters.search:
         needle = filters.search.lower()
-        result = [group for group in result if group_matches_search(group, needle)]
+        result = [group for group in result if monitor_group_matches_search(group, needle)]
     return result
 
 
-def group_matches_search(group: WebGroup, needle: str) -> bool:
+def monitor_group_matches_search(group: IpGroup, needle: str) -> bool:
     haystack = " ".join(
         [
             group.ip,
             group.last_seen,
             group.country or "",
-            group.latest_status,
-            group.top_paths,
+            group.hostname or "",
+            group.services,
+            group.processes,
         ]
     ).lower()
     return needle in haystack
 
 
-def banned_row_matches_filters(row: BannedWebRow, filters: WebFilterState) -> bool:
+def banned_ip_row_matches_filters(row: BannedIpRow, filters: MonitorFilterState) -> bool:
     if filters.ip and row.ip != filters.ip:
         return False
     if filters.country and (row.country or "").upper() != filters.country:
@@ -584,8 +750,9 @@ def banned_row_matches_filters(row: BannedWebRow, filters: WebFilterState) -> bo
                 row.reason,
                 row.country or "",
                 row.last_seen,
-                row.latest_status,
-                row.top_paths,
+                row.hostname or "",
+                row.services,
+                row.processes,
             ]
         ).lower()
         return needle in haystack
@@ -606,10 +773,12 @@ def parse_filter_datetime(value: str) -> float | None:
     text = value.strip()
     if not text:
         return None
-    parsed = parse_datetime(text)
-    if parsed is None and len(text) == 10:
-        parsed = parse_datetime(f"{text} 00:00:00")
-    return parsed.timestamp() if parsed else None
+    if len(text) == 10:
+        text = f"{text} 00:00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 def parse_ban_created_at(value: str) -> float | None:

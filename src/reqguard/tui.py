@@ -12,6 +12,7 @@ from .enrich import CountryLookup, reverse_dns
 from .firewall import ban_ip, unban_ip
 from .models import BanEntry, Connection
 from .procnet import read_connections
+from .stats import CountryStat, TrafficStats, build_traffic_stats
 from .text import safe_terminal_text
 from .viewport import scroll_start_index
 
@@ -22,6 +23,8 @@ DETAIL_COLUMNS = "    Seen                Remote endpoint           -> Local end
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
 VIEW_BANS = "bans"
+VIEW_STATS = "stats"
+VIEW_MODES = (VIEW_REQUESTS, VIEW_BANS, VIEW_STATS)
 
 COLOR_HEADER = 1
 COLOR_LIVE = 2
@@ -129,6 +132,7 @@ class MonitorApp:
         self.selected = 0
         self.expanded: set[str] = set()
         self.connection_seen: dict[tuple[str, str, int, str, int, str], tuple[float, str]] = {}
+        self.connection_history: list[Connection] = []
         self.message = ""
 
     def run(self) -> None:
@@ -227,6 +231,7 @@ class MonitorApp:
                 conn.inode,
             )
             active_keys.add(key)
+            is_new_connection = key not in self.connection_seen
             if key not in self.connection_seen:
                 self.connection_seen[key] = (
                     (conn.observed_at, conn.observed_time)
@@ -243,6 +248,8 @@ class MonitorApp:
                 observed_at=observed_at,
                 observed_time=observed_time,
             )
+            if is_new_connection:
+                self.connection_history.append(enriched)
             if connection_matches_filters(enriched, self.filters):
                 by_ip[enriched.remote_ip].append(enriched)
         for key in set(self.connection_seen) - active_keys:
@@ -281,6 +288,8 @@ class MonitorApp:
     def _visible_rows(self, groups: list[IpGroup], banned_rows: list[BannedIpRow]) -> list[IpGroup | BannedIpRow]:
         if self.view_mode == VIEW_BANS:
             return banned_rows
+        if self.view_mode == VIEW_STATS:
+            return []
         return [group for group in groups if not group.banned]
 
     def _toggle(self, ip: str) -> None:
@@ -295,7 +304,8 @@ class MonitorApp:
         self.message = f"sort changed to {self.sort_mode}"
 
     def _toggle_view(self) -> None:
-        self.view_mode = VIEW_BANS if self.view_mode == VIEW_REQUESTS else VIEW_REQUESTS
+        index = VIEW_MODES.index(self.view_mode) if self.view_mode in VIEW_MODES else 0
+        self.view_mode = VIEW_MODES[(index + 1) % len(VIEW_MODES)]
         self.selected = 0
         self.message = f"view changed to {self.view_mode}"
 
@@ -378,16 +388,24 @@ class MonitorApp:
             stdscr.refresh()
             return
 
-        total_connections = sum(item.count for item in visible_rows)
+        history_groups = self._history_groups() if self.view_mode == VIEW_STATS else []
+        stats = self._stats(history_groups) if self.view_mode == VIEW_STATS else None
+        total_connections = stats.total if stats else sum(item.count for item in visible_rows)
         selected_row = visible_rows[self.selected] if visible_rows else None
 
-        self._draw_header(stdscr, width, len(banned_rows), len(visible_rows), total_connections, last_refresh_time)
+        ip_count = stats.unique_ips if stats else len(visible_rows)
+        self._draw_header(stdscr, width, len(banned_rows), ip_count, total_connections, last_refresh_time)
         if self.message:
             attr = self._color(COLOR_ERROR if "failed" in self.message else COLOR_STATUS)
             stdscr.addnstr(2, 0, f"Last action: {safe_terminal_text(self.message)}", width - 1, attr)
         else:
             stdscr.addnstr(2, 0, "Last action: none", width - 1, self._color(COLOR_DETAIL))
         stdscr.addnstr(3, 0, self._filter_summary().ljust(width - 1), width - 1, self._color(COLOR_DETAIL))
+
+        if self.view_mode == VIEW_STATS:
+            self._draw_stats(stdscr, width, height, stats)
+            stdscr.refresh()
+            return
 
         columns = (
             "Status  Last seen           IP remoto          Conn  Country   Hostname/Server                 Porte locali"
@@ -429,6 +447,104 @@ class MonitorApp:
                 row = self._draw_group_details(stdscr, row, width, list_bottom, detail_group)
         self._draw_selected_summary(stdscr, height, width, selected_row)
         stdscr.refresh()
+
+    def _history_groups(self) -> list[IpGroup]:
+        bans = self.banlist.load()
+        by_ip: dict[str, list[Connection]] = defaultdict(list)
+        for conn in self.connection_history:
+            refreshed = replace(
+                conn,
+                country=self.country_lookup.country(conn.remote_ip),
+                banned=conn.remote_ip in bans,
+            )
+            if connection_matches_filters(refreshed, self.filters):
+                by_ip[refreshed.remote_ip].append(refreshed)
+        groups = [
+            IpGroup(
+                ip=ip,
+                count=len(connections),
+                connections=sorted(connections, key=lambda item: (-item.observed_at, item.local_port, item.remote_port)),
+                country=connections[0].country,
+                hostname=connections[0].hostname,
+                banned=ip in bans,
+            )
+            for ip, connections in by_ip.items()
+        ]
+        return apply_monitor_group_filters(groups, self.filters)
+
+    def _stats(self, history_groups: list[IpGroup]) -> TrafficStats:
+        bans = self.banlist.load()
+        banned_rows = self._banned_rows(history_groups)
+        observations = [
+            (conn.remote_ip, group.country)
+            for group in history_groups
+            for conn in group.connections
+        ]
+        return build_traffic_stats(
+            observations,
+            set(bans),
+            [row.country for row in banned_rows],
+        )
+
+    def _draw_stats(
+        self,
+        stdscr: curses.window,
+        width: int,
+        height: int,
+        stats: TrafficStats | None,
+    ) -> None:
+        if stats is None:
+            return
+        row = 4
+        stdscr.addnstr(row, 0, "Metriche sessione", width - 1, curses.A_BOLD)
+        row += 1
+        stdscr.hline(row, 0, curses.ACS_HLINE, width - 1)
+        row += 1
+        lines = [
+            f"Connessioni osservate: {stats.total}",
+            f"IP unici osservati: {stats.unique_ips}",
+            f"Connessioni LIVE/non bannate: {stats.live}",
+            f"Connessioni da IP bannati: {stats.banned}",
+            f"Ban persistenti: {stats.persisted_bans}",
+        ]
+        for line in lines:
+            if row >= height - 1:
+                break
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_STATUS))
+            row += 1
+
+        row += 1
+        row = self._draw_country_stats(stdscr, row, width, height, "Connessioni per country", stats.countries)
+        row += 1
+        self._draw_country_stats(stdscr, row, width, height, "Country piu bannati", stats.banned_countries)
+        stdscr.addnstr(height - 1, 0, HELP.ljust(width - 1), width - 1, curses.A_REVERSE)
+
+    def _draw_country_stats(
+        self,
+        stdscr: curses.window,
+        row: int,
+        width: int,
+        height: int,
+        title: str,
+        countries: list[CountryStat],
+    ) -> int:
+        if row >= height - 1:
+            return row
+        stdscr.addnstr(row, 0, title, width - 1, curses.A_BOLD)
+        row += 1
+        if row < height - 1:
+            stdscr.addnstr(row, 0, "Country   Count   IP unici   Da IP bannati", width - 1, curses.A_DIM)
+            row += 1
+        for item in countries[:10]:
+            if row >= height - 1:
+                break
+            line = f"{safe_terminal_text(item.country):<9} {item.count:<7} {item.unique_ips:<9} {item.banned_count:<13}"
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        if not countries and row < height - 1:
+            stdscr.addnstr(row, 0, "-", width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        return row
 
     def _display_row_height(self, item: IpGroup | BannedIpRow) -> int:
         detail_group = item.group if isinstance(item, BannedIpRow) else item

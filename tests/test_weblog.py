@@ -1,6 +1,18 @@
 from pathlib import Path
 
-from reqguard.web_tui import WebFilterState, apply_group_filters, build_web_groups, event_matches_filters, parse_date_range, sort_web_groups
+from reqguard.web_tui import (
+    VIEW_BANS,
+    VIEW_REQUESTS,
+    VIEW_STATS,
+    WebFilterState,
+    WebMonitorApp,
+    apply_group_filters,
+    build_web_groups,
+    event_matches_filters,
+    parse_date_range,
+    sort_web_groups,
+)
+from reqguard.config import Config
 from reqguard.weblog import WebGroup, WebLogReader, WebRequest, parse_log_line
 
 
@@ -157,3 +169,14 @@ def test_parse_date_range_accepts_start_and_end():
     assert start is not None
     assert end is not None
     assert start < end
+
+
+def test_web_monitor_view_cycle_includes_stats(tmp_path):
+    app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
+
+    app._toggle_view()
+    assert app.view_mode == VIEW_BANS
+    app._toggle_view()
+    assert app.view_mode == VIEW_STATS
+    app._toggle_view()
+    assert app.view_mode == VIEW_REQUESTS

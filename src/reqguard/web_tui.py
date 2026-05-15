@@ -11,6 +11,7 @@ from .config import Config
 from .enrich import CountryLookup
 from .firewall import ban_ip, unban_ip
 from .models import BanEntry
+from .stats import CountryStat, TrafficStats, build_traffic_stats
 from .text import safe_terminal_text
 from .viewport import scroll_start_index
 from .weblog import WebGroup, WebLogReader, WebRequest, default_log_file, parse_datetime
@@ -22,6 +23,8 @@ DETAIL_COLUMNS = "    Seen                Method Path                           
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
 VIEW_BANS = "bans"
+VIEW_STATS = "stats"
+VIEW_MODES = (VIEW_REQUESTS, VIEW_BANS, VIEW_STATS)
 
 COLOR_HEADER = 1
 COLOR_LIVE = 2
@@ -213,6 +216,8 @@ class WebMonitorApp:
     def _visible_rows(self, groups: list[WebGroup], banned_rows: list[BannedWebRow]) -> list[WebGroup | BannedWebRow]:
         if self.view_mode == VIEW_BANS:
             return banned_rows
+        if self.view_mode == VIEW_STATS:
+            return []
         return [group for group in groups if not group.banned]
 
     def _toggle(self, ip: str) -> None:
@@ -227,7 +232,8 @@ class WebMonitorApp:
         self.message = f"sort changed to {self.sort_mode}"
 
     def _toggle_view(self) -> None:
-        self.view_mode = VIEW_BANS if self.view_mode == VIEW_REQUESTS else VIEW_REQUESTS
+        index = VIEW_MODES.index(self.view_mode) if self.view_mode in VIEW_MODES else 0
+        self.view_mode = VIEW_MODES[(index + 1) % len(VIEW_MODES)]
         self.selected = 0
         self.message = f"view changed to {self.view_mode}"
 
@@ -312,8 +318,9 @@ class WebMonitorApp:
             stdscr.refresh()
             return
         selected_row = visible_rows[self.selected] if visible_rows else None
-        visible_ip_count = len(visible_rows)
-        visible_total_requests = sum(item.count for item in visible_rows)
+        stats = self._stats(groups, banned_rows) if self.view_mode == VIEW_STATS else None
+        visible_ip_count = stats.unique_ips if stats else len(visible_rows)
+        visible_total_requests = stats.total if stats else sum(item.count for item in visible_rows)
         self._draw_header(stdscr, width, visible_ip_count, visible_total_requests, len(banned_rows), last_refresh_time)
         if self.message:
             attr = self._color(COLOR_ERROR if "failed" in self.message else COLOR_STATUS)
@@ -321,6 +328,11 @@ class WebMonitorApp:
         else:
             stdscr.addnstr(2, 0, f"Log: {safe_terminal_text(self.log_file)}", width - 1, self._color(COLOR_DETAIL))
         stdscr.addnstr(3, 0, self._filter_summary().ljust(width - 1), width - 1, self._color(COLOR_DETAIL))
+
+        if self.view_mode == VIEW_STATS:
+            self._draw_stats(stdscr, width, height, stats)
+            stdscr.refresh()
+            return
 
         columns = (
             "Status  Last seen           IP remoto          Country   Req   Response Code  Top path"
@@ -359,6 +371,79 @@ class WebMonitorApp:
                 row = self._draw_group_details(stdscr, row, width, list_bottom, detail_group)
         self._draw_selected_summary(stdscr, height, width, selected_row)
         stdscr.refresh()
+
+    def _stats(self, groups: list[WebGroup], banned_rows: list[BannedWebRow]) -> TrafficStats:
+        banned_ips = set(self.banlist.load())
+        observations = [
+            (request.ip, group.country)
+            for group in groups
+            for request in group.requests
+        ]
+        return build_traffic_stats(
+            observations,
+            banned_ips,
+            [row.country for row in banned_rows],
+        )
+
+    def _draw_stats(
+        self,
+        stdscr: curses.window,
+        width: int,
+        height: int,
+        stats: TrafficStats | None,
+    ) -> None:
+        if stats is None:
+            return
+        row = 4
+        stdscr.addnstr(row, 0, "Metriche richieste", width - 1, curses.A_BOLD)
+        row += 1
+        stdscr.hline(row, 0, curses.ACS_HLINE, width - 1)
+        row += 1
+        lines = [
+            f"Richieste osservate: {stats.total}",
+            f"IP unici osservati: {stats.unique_ips}",
+            f"Richieste LIVE/non bannate: {stats.live}",
+            f"Richieste da IP bannati: {stats.banned}",
+            f"Ban persistenti: {stats.persisted_bans}",
+        ]
+        for line in lines:
+            if row >= height - 1:
+                break
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_STATUS))
+            row += 1
+
+        row += 1
+        row = self._draw_country_stats(stdscr, row, width, height, "Richieste per country", stats.countries)
+        row += 1
+        self._draw_country_stats(stdscr, row, width, height, "Country piu bannati", stats.banned_countries)
+        stdscr.addnstr(height - 1, 0, HELP.ljust(width - 1), width - 1, curses.A_REVERSE)
+
+    def _draw_country_stats(
+        self,
+        stdscr: curses.window,
+        row: int,
+        width: int,
+        height: int,
+        title: str,
+        countries: list[CountryStat],
+    ) -> int:
+        if row >= height - 1:
+            return row
+        stdscr.addnstr(row, 0, title, width - 1, curses.A_BOLD)
+        row += 1
+        if row < height - 1:
+            stdscr.addnstr(row, 0, "Country   Count   IP unici   Da IP bannati", width - 1, curses.A_DIM)
+            row += 1
+        for item in countries[:10]:
+            if row >= height - 1:
+                break
+            line = f"{safe_terminal_text(item.country):<9} {item.count:<7} {item.unique_ips:<9} {item.banned_count:<13}"
+            stdscr.addnstr(row, 0, line, width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        if not countries and row < height - 1:
+            stdscr.addnstr(row, 0, "-", width - 1, self._color(COLOR_DETAIL))
+            row += 1
+        return row
 
     def _display_row_height(self, item: WebGroup | BannedWebRow) -> int:
         detail_group = item.group if isinstance(item, BannedWebRow) else item
