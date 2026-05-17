@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import reqguard.web_tui as web_tui
 from reqguard.web_tui import (
     VIEW_BANS,
     VIEW_REQUESTS,
@@ -13,6 +14,7 @@ from reqguard.web_tui import (
     sort_web_groups,
 )
 from reqguard.config import Config
+from reqguard.models import BanEntry
 from reqguard.weblog import WebGroup, WebLogReader, WebRequest, parse_log_line
 
 
@@ -231,3 +233,60 @@ def test_web_monitor_clear_filters_resets_path_ip_date_and_search(tmp_path):
 
     assert app.filters == WebFilterState()
     assert app.message == "all filters cleared"
+
+
+def test_web_monitor_shift_selection_extends_action_rows(tmp_path):
+    app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
+    rows = [
+        WebGroup(ip="203.0.113.1", count=1, requests=[]),
+        WebGroup(ip="203.0.113.2", count=1, requests=[]),
+        WebGroup(ip="203.0.113.3", count=1, requests=[]),
+    ]
+
+    app._extend_selection(rows, 1)
+    app._extend_selection(rows, 1)
+
+    assert app.selected == 2
+    assert app.selected_ips == {"203.0.113.1", "203.0.113.2", "203.0.113.3"}
+    assert [row.ip for row in app._action_rows(rows, WebGroup)] == [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+    ]
+
+
+def test_web_monitor_action_rows_fall_back_to_current_ban_row(tmp_path):
+    app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
+    rows = [
+        web_tui.BannedWebRow(BanEntry("203.0.113.1", "manual", "2026-05-17T10:00:00+00:00")),
+        web_tui.BannedWebRow(BanEntry("203.0.113.2", "manual", "2026-05-17T10:01:00+00:00")),
+    ]
+    app.selected = 1
+
+    assert [row.ip for row in app._action_rows(rows, web_tui.BannedWebRow)] == ["203.0.113.2"]
+
+
+def test_web_monitor_bulk_ban_uses_web_ports_and_persists_each_ip(tmp_path, monkeypatch):
+    calls: list[tuple[str, tuple[int, ...] | None]] = []
+    monkeypatch.setattr(
+        web_tui,
+        "ban_ip",
+        lambda ip, backend=None, ports=None: calls.append((ip, ports)),
+    )
+    monkeypatch.setattr(web_tui, "unban_ip", lambda ip, backend=None, ports=None: None)
+    app = WebMonitorApp(
+        Config(bans_file=Path(tmp_path) / "bans.json", web_ban_ports=(8080, 8443)),
+        log_file=Path(tmp_path) / "access.log",
+    )
+    groups = [
+        WebGroup(ip="203.0.113.1", count=2, requests=[]),
+        WebGroup(ip="203.0.113.2", count=3, requests=[]),
+    ]
+    app.selected_ips = {group.ip for group in groups}
+
+    app._ban_groups(groups)
+
+    assert calls == [("203.0.113.1", (8080, 8443)), ("203.0.113.2", (8080, 8443))]
+    assert set(app.banlist.load()) == {"203.0.113.1", "203.0.113.2"}
+    assert all(entry.ports == (8080, 8443) for entry in app.banlist.load().values())
+    assert app.selected_ips == set()

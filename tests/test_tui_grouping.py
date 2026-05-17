@@ -2,7 +2,7 @@ from pathlib import Path
 
 import reqguard.tui as tui
 from reqguard.config import Config
-from reqguard.models import Connection
+from reqguard.models import BanEntry, Connection
 
 
 def test_groups_are_sorted_by_arrival_by_default(tmp_path, monkeypatch):
@@ -275,3 +275,52 @@ def test_monitor_clear_filters_resets_every_filter(tmp_path):
 
     assert app.filters == tui.MonitorFilterState()
     assert app.message == "all filters cleared"
+
+
+def test_monitor_shift_selection_extends_action_rows(tmp_path):
+    app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
+    rows = [
+        tui.IpGroup(ip="203.0.113.1", count=1, connections=[]),
+        tui.IpGroup(ip="203.0.113.2", count=1, connections=[]),
+        tui.IpGroup(ip="203.0.113.3", count=1, connections=[]),
+    ]
+
+    app._extend_selection(rows, 1)
+    app._extend_selection(rows, 1)
+
+    assert app.selected == 2
+    assert app.selected_ips == {"203.0.113.1", "203.0.113.2", "203.0.113.3"}
+    assert [row.ip for row in app._action_rows(rows, tui.IpGroup)] == [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+    ]
+
+
+def test_monitor_action_rows_fall_back_to_current_row(tmp_path):
+    app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
+    rows = [
+        tui.BannedIpRow(BanEntry("203.0.113.1", "manual", "2026-05-17T10:00:00+00:00")),
+        tui.BannedIpRow(BanEntry("203.0.113.2", "manual", "2026-05-17T10:01:00+00:00")),
+    ]
+    app.selected = 1
+
+    assert [row.ip for row in app._action_rows(rows, tui.BannedIpRow)] == ["203.0.113.2"]
+
+
+def test_monitor_bulk_ban_persists_each_selected_ip(tmp_path, monkeypatch):
+    banned: list[str] = []
+    monkeypatch.setattr(tui, "ban_ip", lambda ip, backend=None: banned.append(ip))
+    monkeypatch.setattr(tui, "unban_ip", lambda ip, backend=None: None)
+    app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
+    groups = [
+        tui.IpGroup(ip="203.0.113.1", count=2, connections=[]),
+        tui.IpGroup(ip="203.0.113.2", count=3, connections=[]),
+    ]
+    app.selected_ips = {group.ip for group in groups}
+
+    app._ban_groups(groups)
+
+    assert banned == ["203.0.113.1", "203.0.113.2"]
+    assert set(app.banlist.load()) == {"203.0.113.1", "203.0.113.2"}
+    assert app.selected_ips == set()

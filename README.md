@@ -4,7 +4,7 @@
 
 Il progetto nasce per lavorare via SSH, senza dashboard web e senza interfaccia grafica.
 
-Versione documentata: `0.3.27`.
+Versione documentata: `0.3.28`.
 
 ## Cosa Fa
 
@@ -351,9 +351,9 @@ cd /tmp/reqguard
 Distribuisci solo il `.deb` al server:
 
 ```bash
-scp build/deb/reqguard_0.3.27_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.28_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 Verifica:
@@ -378,14 +378,14 @@ cd /tmp/reqguard
 2. Copia solo il pacchetto sul server di destinazione:
 
 ```bash
-scp build/deb/reqguard_0.3.27_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.28_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il pacchetto sul server:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 4. Durante l'installazione il pacchetto controlla il file:
@@ -452,20 +452,20 @@ cd /tmp/reqguard
 2. Copia il nuovo `.deb` sul server:
 
 ```bash
-scp build/deb/reqguard_0.3.27_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.28_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il nuovo `.deb`:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 Se stai reinstallando la stessa identica versione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 Il file `/etc/default/reqguard` non viene sovrascritto durante l'upgrade. I nuovi default del pacchetto vengono installati come template in:
@@ -482,7 +482,7 @@ diff -u /etc/default/reqguard /usr/share/reqguard/reqguard.default
 
 e aggiungi a `/etc/default/reqguard` solo le variabili che vuoi adottare.
 
-Per la versione `0.3.27` controlla in particolare questa variabile:
+Per la versione `0.3.28` controlla in particolare questa variabile:
 
 ```bash
 REQGUARD_WEB_BAN_PORTS=80,443
@@ -717,15 +717,18 @@ sudo reqguard --firewall-backend ufw web-monitor --log-file /var/log/nginx/acces
 Valgono per entrambi i monitor:
 
 ```text
-Up/Down       seleziona IP
-Enter/Space   espande o chiude dettagli
-s             cambia ordinamento
-b             banna IP selezionato
-u             rimuove ban dell'IP selezionato
-r             refresh manuale
-q             esce
-Ctrl+C        esce senza traceback
+Up/Down          seleziona IP
+Shift+Up/Down    estende selezione su piu righe
+Enter/Space      espande o chiude dettagli
+s                cambia ordinamento
+b                banna IP selezionati, o quello corrente
+u                rimuove ban degli IP selezionati, o quello corrente
+r                refresh manuale
+q                esce
+Ctrl+C           esce senza traceback
 ```
+
+La selezione multipla funziona sia nella vista principale sia nella vista ban. Le righe selezionate sono marcate con `*`; `b` applica il ban in bulk dalla vista principale, `u` fa unban in bulk dalla vista ban.
 
 ## Guida Ai Filtri
 
@@ -1029,21 +1032,21 @@ Su una macchina Ubuntu usata come build host:
 Output:
 
 ```text
-build/deb/reqguard_0.3.27_all.deb
+build/deb/reqguard_0.3.28_all.deb
 ```
 
 Installazione:
 
 ```bash
-scp build/deb/reqguard_0.3.27_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.28_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 Se `apt` dice che e gia installato alla versione piu recente, incrementa la versione del pacchetto oppure forza la reinstallazione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.27_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.28_all.deb
 ```
 
 Nota architettura: il pacchetto e `Architecture: all`, quindi e indipendente dalla CPU. Puoi usare lo stesso `.deb` su x86_64, ARM64 o ARM se il sistema e Ubuntu/Linux compatibile e dispone delle dipendenze richieste.
