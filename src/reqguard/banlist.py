@@ -62,6 +62,25 @@ class BanList:
         self.save(entries)
         return entry
 
+    def add_many(self, items: list[tuple[str, str, tuple[int, ...] | list[int] | None]]) -> list[BanEntry]:
+        entries = self.load()
+        added: list[BanEntry] = []
+        for ip, reason, ports in items:
+            normalized = str(ip_address(ip))
+            entry = entries.get(normalized) or BanEntry.create(normalized, reason)
+            next_ports = normalize_ports(ports) if ports is not None else entry.ports
+            if reason or next_ports != entry.ports:
+                entry = BanEntry(
+                    ip=entry.ip,
+                    reason=reason or entry.reason,
+                    created_at=entry.created_at,
+                    ports=next_ports,
+                )
+            entries[normalized] = entry
+            added.append(entry)
+        self.save(entries)
+        return added
+
     def remove(self, ip: str) -> bool:
         normalized = str(ip_address(ip))
         entries = self.load()
@@ -69,6 +88,17 @@ class BanList:
         entries.pop(normalized, None)
         self.save(entries)
         return existed
+
+    def remove_many(self, ips: list[str]) -> int:
+        entries = self.load()
+        removed = 0
+        for ip in ips:
+            normalized = str(ip_address(ip))
+            if normalized in entries:
+                removed += 1
+            entries.pop(normalized, None)
+        self.save(entries)
+        return removed
 
     def contains(self, ip: str) -> bool:
         try:

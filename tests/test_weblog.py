@@ -255,6 +255,27 @@ def test_web_monitor_shift_selection_extends_action_rows(tmp_path):
     ]
 
 
+def test_web_monitor_manual_selection_can_mark_all_and_clear(tmp_path):
+    app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
+    rows = [
+        WebGroup(ip="203.0.113.1", count=1, requests=[]),
+        WebGroup(ip="203.0.113.2", count=1, requests=[]),
+        WebGroup(ip="203.0.113.3", count=1, requests=[]),
+    ]
+
+    app._toggle_selection(rows)
+    app.selected = 1
+    app._toggle_selection(rows)
+
+    assert app.selected_ips == {"203.0.113.1", "203.0.113.2"}
+
+    app._select_all(rows)
+    assert app.selected_ips == {"203.0.113.1", "203.0.113.2", "203.0.113.3"}
+
+    app._clear_selection()
+    assert app.selected_ips == set()
+
+
 def test_web_monitor_action_rows_fall_back_to_current_ban_row(tmp_path):
     app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
     rows = [

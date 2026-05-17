@@ -10,7 +10,7 @@ from .banlist import BanList
 from .config import Config
 from .enrich import CountryLookup, reverse_dns
 from .firewall import ban_ip, unban_ip
-from .keys import is_shift_down, is_shift_up
+from .keys import KEY_TIMEOUT_MS, is_shift_down, is_shift_up, read_key
 from .matchers import matches_any_text_filter, matches_text_filter
 from .models import BanEntry, Connection
 from .procnet import read_connections
@@ -20,7 +20,7 @@ from .viewport import scroll_start_index
 
 
 TITLE = "Reqguard network monitor"
-HELP = "Shift+Up/Down select | v/Tab view | / search | i IP | h host | p port | d date | c country | x clear | s sort | b ban | u unban | q quit"
+HELP = "m mark | a all | z clear selection | v/Tab view | / search | i IP | h host | p port | d date | c country | x clear filters | s sort | b ban | u unban | q quit"
 DETAIL_COLUMNS = "    Seen                Remote endpoint           -> Local endpoint          State       Process"
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
@@ -151,7 +151,7 @@ class MonitorApp:
         self._setup_colors()
         stdscr.keypad(True)
         stdscr.nodelay(True)
-        stdscr.timeout(150)
+        stdscr.timeout(KEY_TIMEOUT_MS)
         last_refresh = 0.0
         last_refresh_time = "-"
         groups: list[IpGroup] = []
@@ -168,7 +168,7 @@ class MonitorApp:
                 last_refresh = now
                 last_refresh_time = current_display_time()
             self._draw(stdscr, groups, banned_rows, visible_rows, last_refresh_time)
-            key = stdscr.getch()
+            key = read_key(stdscr)
             if key in {ord("q"), ord("Q")}:
                 break
             if is_shift_up(key):
@@ -177,10 +177,14 @@ class MonitorApp:
                 self._extend_selection(visible_rows, 1)
             elif key == curses.KEY_UP:
                 self.selected = max(0, self.selected - 1)
-                self.selected_ips.clear()
             elif key == curses.KEY_DOWN:
                 self.selected = min(max(len(visible_rows) - 1, 0), self.selected + 1)
-                self.selected_ips.clear()
+            elif key in {ord("m"), ord("M")}:
+                self._toggle_selection(visible_rows)
+            elif key in {ord("a"), ord("A")}:
+                self._select_all(visible_rows)
+            elif key in {ord("z"), ord("Z")}:
+                self._clear_selection()
             elif key in {curses.KEY_ENTER, 10, 13, ord(" ")} and visible_rows:
                 self._toggle(visible_rows[self.selected].ip)
             elif key in {9, ord("v"), ord("V")}:
@@ -235,9 +239,11 @@ class MonitorApp:
             elif key in {ord("r"), ord("R")}:
                 last_refresh = 0.0
             elif key in {ord("b"), ord("B")} and visible_rows and self.view_mode == VIEW_REQUESTS:
+                self._show_waiting(stdscr, visible_rows, groups, banned_rows, last_refresh_time, "WAITING ... applying bulk ban")
                 self._ban_groups(self._action_rows(visible_rows, IpGroup))
                 last_refresh = 0.0
             elif key in {ord("u"), ord("U")} and visible_rows and self.view_mode == VIEW_BANS:
+                self._show_waiting(stdscr, visible_rows, groups, banned_rows, last_refresh_time, "WAITING ... applying bulk unban")
                 self._unban_ips([row.ip for row in self._action_rows(visible_rows, BannedIpRow)])
                 last_refresh = 0.0
 
@@ -334,6 +340,26 @@ class MonitorApp:
     def _sync_selection(self, visible_rows: list[IpGroup | BannedIpRow]) -> None:
         visible_ips = {row.ip for row in visible_rows}
         self.selected_ips.intersection_update(visible_ips)
+
+    def _toggle_selection(self, visible_rows: list[IpGroup | BannedIpRow]) -> None:
+        if not visible_rows:
+            return
+        ip = visible_rows[self.selected].ip
+        if ip in self.selected_ips:
+            self.selected_ips.remove(ip)
+            self.message = f"unmarked {ip}"
+        else:
+            self.selected_ips.add(ip)
+            self.message = f"marked {ip}"
+
+    def _select_all(self, visible_rows: list[IpGroup | BannedIpRow]) -> None:
+        self.selected_ips = {row.ip for row in visible_rows}
+        self.message = f"marked {len(self.selected_ips)} visible IP(s)"
+
+    def _clear_selection(self) -> None:
+        count = len(self.selected_ips)
+        self.selected_ips.clear()
+        self.message = f"cleared {count} selected IP(s)"
 
     def _action_rows(
         self,
@@ -433,16 +459,22 @@ class MonitorApp:
         if not groups:
             return
         failures: list[tuple[str, str]] = []
+        successes: list[IpGroup] = []
         for group in groups:
             try:
                 ban_ip(group.ip, backend=self.config.firewall_backend)
-                try:
-                    self.banlist.add(group.ip, reason=f"manual from monitor count={group.count}")
-                except Exception:
-                    unban_ip(group.ip, backend=self.config.firewall_backend)
-                    raise
+                successes.append(group)
             except Exception as exc:
                 failures.append((group.ip, str(exc)))
+        try:
+            self.banlist.add_many(
+                [(group.ip, f"manual from monitor count={group.count}", None) for group in successes]
+            )
+        except Exception as exc:
+            for group in successes:
+                unban_ip(group.ip, backend=self.config.firewall_backend)
+            self.message = f"bulk ban failed while saving bans: {exc}"
+            return
         failed_ips = {ip for ip, _ in failures}
         self.selected_ips.difference_update(group.ip for group in groups if group.ip not in failed_ips)
         if failures:
@@ -462,12 +494,14 @@ class MonitorApp:
         if not ips:
             return
         failures: list[tuple[str, str]] = []
+        successes: list[str] = []
         for ip in ips:
             try:
                 unban_ip(ip, backend=self.config.firewall_backend)
-                self.banlist.remove(ip)
+                successes.append(ip)
             except Exception as exc:
                 failures.append((ip, str(exc)))
+        self.banlist.remove_many(successes)
         failed_ips = {ip for ip, _ in failures}
         self.selected_ips.difference_update(ip for ip in ips if ip not in failed_ips)
         if failures:
@@ -525,7 +559,7 @@ class MonitorApp:
             if row >= list_bottom:
                 break
             if isinstance(item, BannedIpRow):
-                attr = self._banned_row_attr(idx == self.selected)
+                attr = self._row_attr(self._banned_row_attr(idx == self.selected), item.ip)
                 marker = self._row_marker(item.ip)
                 country = safe_terminal_text(item.country or "--")
                 host_or_reason = safe_terminal_text(item.hostname or item.reason)
@@ -534,12 +568,13 @@ class MonitorApp:
                     f"{host_or_reason:<31.31} {safe_terminal_text(item.services):<16.16}"
                 )
             else:
-                attr = self._group_attr(item, idx == self.selected)
+                attr = self._row_attr(self._group_attr(item, idx == self.selected), item.ip)
                 marker = self._row_marker(item.ip)
+                status = "SEL " if item.ip in self.selected_ips else "LIVE"
                 country = safe_terminal_text(item.country or "--")
                 host = safe_terminal_text(item.hostname or "-")
                 line = (
-                    f"LIVE   {marker} {item.last_seen:<19} {item.ip:<18} {item.count:<5} {country:<8} "
+                    f"{status}   {marker} {item.last_seen:<19} {item.ip:<18} {item.count:<5} {country:<8} "
                     f"{host:<31.31} {safe_terminal_text(item.services):<16.16}"
                 )
             stdscr.addnstr(row, 0, line, width - 1, attr)
@@ -549,6 +584,18 @@ class MonitorApp:
                 row = self._draw_group_details(stdscr, row, width, list_bottom, detail_group)
         self._draw_selected_summary(stdscr, height, width, selected_row)
         stdscr.refresh()
+
+    def _show_waiting(
+        self,
+        stdscr: curses.window,
+        visible_rows: list[IpGroup | BannedIpRow],
+        groups: list[IpGroup],
+        banned_rows: list[BannedIpRow],
+        last_refresh_time: str,
+        message: str,
+    ) -> None:
+        self.message = message
+        self._draw(stdscr, groups, banned_rows, visible_rows, last_refresh_time)
 
     def _history_groups(self) -> list[IpGroup]:
         bans = self.banlist.load()
@@ -658,6 +705,11 @@ class MonitorApp:
         if ip in self.selected_ips:
             return "*"
         return "-" if ip in self.expanded else "+"
+
+    def _row_attr(self, attr: int, ip: str) -> int:
+        if ip in self.selected_ips:
+            return attr | curses.A_REVERSE | curses.A_BOLD
+        return attr
 
     def _draw_group_details(
         self,
