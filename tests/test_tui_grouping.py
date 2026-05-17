@@ -136,6 +136,67 @@ def test_monitor_filters_are_applied_before_grouping_counts(tmp_path, monkeypatc
     assert groups[0].services == "80"
 
 
+def test_monitor_ip_filter_accepts_wildcard_prefix():
+    assert tui.connection_matches_filters(
+        Connection("tcp", "10.0.0.5", 443, "192.189.10.20", 50001, "ESTABLISHED", "1"),
+        tui.MonitorFilterState(ip="192.189.*"),
+    )
+    assert not tui.connection_matches_filters(
+        Connection("tcp", "10.0.0.5", 443, "192.188.10.20", 50001, "ESTABLISHED", "1"),
+        tui.MonitorFilterState(ip="192.189.*"),
+    )
+
+
+def test_monitor_hostname_and_port_filters_accept_wildcards():
+    matching = Connection(
+        "tcp",
+        "10.0.0.5",
+        443,
+        "192.189.10.20",
+        50001,
+        "ESTABLISHED",
+        "1",
+        hostname="scanner.example.com",
+    )
+    wrong_host = Connection(
+        "tcp",
+        "10.0.0.5",
+        443,
+        "192.189.10.21",
+        50002,
+        "ESTABLISHED",
+        "2",
+        hostname="client.example.com",
+    )
+    wrong_port = Connection(
+        "tcp",
+        "10.0.0.5",
+        8443,
+        "192.189.10.22",
+        50003,
+        "ESTABLISHED",
+        "3",
+        hostname="scanner.example.com",
+    )
+
+    filters = tui.MonitorFilterState(hostname="scanner.*", port="44*")
+
+    assert tui.connection_matches_filters(matching, filters)
+    assert not tui.connection_matches_filters(wrong_host, filters)
+    assert not tui.connection_matches_filters(wrong_port, filters)
+
+
+def test_monitor_port_filter_is_exact_without_wildcard():
+    assert tui.connection_matches_filters(
+        Connection("tcp", "10.0.0.5", 80, "192.189.10.20", 50001, "ESTABLISHED", "1"),
+        tui.MonitorFilterState(port="80"),
+    )
+    assert not tui.connection_matches_filters(
+        Connection("tcp", "10.0.0.5", 8080, "192.189.10.20", 50001, "ESTABLISHED", "1"),
+        tui.MonitorFilterState(port="80"),
+    )
+
+
 def test_monitor_search_and_country_filters_match_group_fields():
     groups = [
         tui.IpGroup(
@@ -163,6 +224,29 @@ def test_monitor_search_and_country_filters_match_group_fields():
     assert [group.ip for group in filtered] == ["203.0.113.9"]
 
 
+def test_monitor_search_filter_accepts_wildcard_patterns():
+    groups = [
+        tui.IpGroup(
+            ip="192.189.10.20",
+            count=1,
+            connections=[
+                Connection("tcp", "10.0.0.5", 443, "192.189.10.20", 50001, "ESTABLISHED", "1", observed_at=100)
+            ],
+        ),
+        tui.IpGroup(
+            ip="192.188.10.20",
+            count=1,
+            connections=[
+                Connection("tcp", "10.0.0.5", 80, "192.188.10.20", 50002, "ESTABLISHED", "2", observed_at=200)
+            ],
+        ),
+    ]
+
+    filtered = tui.apply_monitor_group_filters(groups, tui.MonitorFilterState(search="192.189.*"))
+
+    assert [group.ip for group in filtered] == ["192.189.10.20"]
+
+
 def test_monitor_view_cycle_includes_stats(tmp_path):
     app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
 
@@ -172,3 +256,22 @@ def test_monitor_view_cycle_includes_stats(tmp_path):
     assert app.view_mode == tui.VIEW_STATS
     app._toggle_view()
     assert app.view_mode == tui.VIEW_REQUESTS
+
+
+def test_monitor_clear_filters_resets_every_filter(tmp_path):
+    app = tui.MonitorApp(Config(bans_file=Path(tmp_path) / "bans.json", reverse_dns=False))
+    app.filters = tui.MonitorFilterState(
+        search="scanner",
+        ip="203.0.113.9",
+        hostname="scanner.*",
+        port="44*",
+        country="US",
+        start_at=100,
+        end_at=200,
+        date_label="2026-05-15",
+    )
+
+    app._clear_filters()
+
+    assert app.filters == tui.MonitorFilterState()
+    assert app.message == "all filters cleared"

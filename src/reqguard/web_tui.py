@@ -10,6 +10,7 @@ from .banlist import BanList
 from .config import Config
 from .enrich import CountryLookup
 from .firewall import ban_ip, unban_ip
+from .matchers import matches_any_text_filter, matches_text_filter
 from .models import BanEntry
 from .stats import CountryStat, TrafficStats, build_traffic_stats
 from .text import safe_terminal_text
@@ -18,7 +19,7 @@ from .weblog import WebGroup, WebLogReader, WebRequest, default_log_file, parse_
 
 
 TITLE = "Reqguard web request monitor"
-HELP = "v/Tab view | / search | i IP | d date range | c country | x clear | s sort | b ban | u unban | q quit"
+HELP = "v/Tab view | / search | i IP | p path | d date range | c country | x clear all filters | s sort | b ban | u unban | q quit"
 DETAIL_COLUMNS = "    Seen                Method Path                                             Status  Host/User-Agent"
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
@@ -38,6 +39,7 @@ COLOR_ERROR = 6
 class WebFilterState:
     search: str = ""
     ip: str = ""
+    path: str = ""
     country: str = ""
     start_at: float | None = None
     end_at: float | None = None
@@ -155,6 +157,12 @@ class WebMonitorApp:
                 banned_rows = self._banned_rows(groups)
                 visible_rows = self._visible_rows(groups, banned_rows)
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
+            elif key in {ord("p"), ord("P")}:
+                self._set_path_filter(stdscr)
+                groups = self._groups()
+                banned_rows = self._banned_rows(groups)
+                visible_rows = self._visible_rows(groups, banned_rows)
+                self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("c"), ord("C")}:
                 self._set_country_filter(stdscr)
                 groups = self._groups()
@@ -168,8 +176,7 @@ class WebMonitorApp:
                 visible_rows = self._visible_rows(groups, banned_rows)
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("x"), ord("X")}:
-                self.filters = WebFilterState()
-                self.message = "filters cleared"
+                self._clear_filters()
                 groups = self._groups()
                 banned_rows = self._banned_rows(groups)
                 visible_rows = self._visible_rows(groups, banned_rows)
@@ -237,15 +244,24 @@ class WebMonitorApp:
         self.selected = 0
         self.message = f"view changed to {self.view_mode}"
 
+    def _clear_filters(self) -> None:
+        self.filters = WebFilterState()
+        self.message = "all filters cleared"
+
     def _set_search(self, stdscr: curses.window) -> None:
         value = self._prompt(stdscr, "Search IP/date/top path (empty clears): ")
         self.filters = replace(self.filters, search=value)
         self.message = f"search set to {value}" if value else "search cleared"
 
     def _set_ip_filter(self, stdscr: curses.window) -> None:
-        value = self._prompt(stdscr, "Filter exact IP (empty clears): ")
+        value = self._prompt(stdscr, "Filter IP/pattern (empty clears): ")
         self.filters = replace(self.filters, ip=value)
         self.message = f"IP filter set to {value}" if value else "IP filter cleared"
+
+    def _set_path_filter(self, stdscr: curses.window) -> None:
+        value = self._prompt(stdscr, "Filter path contains (empty clears): ")
+        self.filters = replace(self.filters, path=value)
+        self.message = f"path filter set to {value}" if value else "path filter cleared"
 
     def _set_country_filter(self, stdscr: curses.window) -> None:
         value = self._prompt(stdscr, "Filter country code, e.g. US (empty clears): ").upper()
@@ -513,6 +529,8 @@ class WebMonitorApp:
             parts.append(f"search={self.filters.search}")
         if self.filters.ip:
             parts.append(f"ip={self.filters.ip}")
+        if self.filters.path:
+            parts.append(f"path={self.filters.path}")
         if self.filters.country:
             parts.append(f"country={self.filters.country}")
         if self.filters.date_label:
@@ -613,7 +631,9 @@ def build_web_groups(events: list[WebRequest], banned_ips: set[str]) -> list[Web
 
 
 def event_matches_filters(event: WebRequest, filters: WebFilterState) -> bool:
-    if filters.ip and event.ip != filters.ip:
+    if filters.ip and not matches_text_filter(event.ip, filters.ip):
+        return False
+    if filters.path and not matches_text_filter(event.path, filters.path, contains=True):
         return False
     if filters.start_at is not None and event.observed_at < filters.start_at:
         return False
@@ -625,30 +645,31 @@ def event_matches_filters(event: WebRequest, filters: WebFilterState) -> bool:
 def apply_group_filters(groups: list[WebGroup], filters: WebFilterState) -> list[WebGroup]:
     result = groups
     if filters.country:
-        result = [group for group in result if (group.country or "").upper() == filters.country]
+        result = [group for group in result if matches_text_filter(group.country or "", filters.country, case_sensitive=False)]
     if filters.search:
-        needle = filters.search.lower()
-        result = [group for group in result if group_matches_search(group, needle)]
+        result = [group for group in result if group_matches_search(group, filters.search)]
     return result
 
 
-def group_matches_search(group: WebGroup, needle: str) -> bool:
-    haystack = " ".join(
+def group_matches_search(group: WebGroup, pattern: str) -> bool:
+    return matches_any_text_filter(
         [
             group.ip,
             group.last_seen,
             group.country or "",
             group.latest_status,
             group.top_paths,
-        ]
-    ).lower()
-    return needle in haystack
+        ],
+        pattern,
+    )
 
 
 def banned_row_matches_filters(row: BannedWebRow, filters: WebFilterState) -> bool:
-    if filters.ip and row.ip != filters.ip:
+    if filters.ip and not matches_text_filter(row.ip, filters.ip):
         return False
-    if filters.country and (row.country or "").upper() != filters.country:
+    if filters.path and row.group is None:
+        return False
+    if filters.country and not matches_text_filter(row.country or "", filters.country, case_sensitive=False):
         return False
     if filters.start_at is not None or filters.end_at is not None:
         created_at = parse_ban_created_at(row.created_at)
@@ -661,8 +682,7 @@ def banned_row_matches_filters(row: BannedWebRow, filters: WebFilterState) -> bo
         if filters.end_at is not None and comparable > filters.end_at:
             return False
     if filters.search:
-        needle = filters.search.lower()
-        haystack = " ".join(
+        return matches_any_text_filter(
             [
                 row.ip,
                 row.created_at,
@@ -671,9 +691,9 @@ def banned_row_matches_filters(row: BannedWebRow, filters: WebFilterState) -> bo
                 row.last_seen,
                 row.latest_status,
                 row.top_paths,
-            ]
-        ).lower()
-        return needle in haystack
+            ],
+            filters.search,
+        )
     return True
 
 

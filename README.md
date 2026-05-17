@@ -4,7 +4,7 @@
 
 Il progetto nasce per lavorare via SSH, senza dashboard web e senza interfaccia grafica.
 
-Versione documentata: `0.3.21`.
+Versione documentata: `0.3.26`.
 
 ## Cosa Fa
 
@@ -24,6 +24,9 @@ Funzioni principali:
 - Header con `Last refresh`, aggiornato a ogni refresh effettivo della schermata.
 - Country lookup configurabile: disabilitato, database locale, `ipwho.is`, oppure fallback automatico locale -> `ipwho.is`.
 - Espansione dell'IP selezionato per vedere dettagli.
+- Nel `web-monitor`, filtro dedicato per path combinabile con filtro IP e date range.
+- I filtri testuali supportano wildcard `*`, per esempio `192.189.*` o `/api/*/login`.
+- Tasto `x` per eliminare tutti i filtri in una sola azione.
 - Stato `LIVE` o `BANNED`.
 - Ban persistenti nel file configurato con `REQGUARD_BANS_FILE`, di default `/var/lib/reqguard/bans.json`.
 - I ban creati da `web-monitor` con backend UFW sono limitati alle porte web configurate, di default `80,443`, per non bloccare SSH.
@@ -348,9 +351,9 @@ cd /tmp/reqguard
 Distribuisci solo il `.deb` al server:
 
 ```bash
-scp build/deb/reqguard_0.3.21_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.26_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 Verifica:
@@ -375,14 +378,14 @@ cd /tmp/reqguard
 2. Copia solo il pacchetto sul server di destinazione:
 
 ```bash
-scp build/deb/reqguard_0.3.21_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.26_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il pacchetto sul server:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 4. Durante l'installazione il pacchetto controlla il file:
@@ -449,20 +452,20 @@ cd /tmp/reqguard
 2. Copia il nuovo `.deb` sul server:
 
 ```bash
-scp build/deb/reqguard_0.3.21_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.26_all.deb user@SERVER:/tmp/
 ssh user@SERVER
 ```
 
 3. Installa il nuovo `.deb`:
 
 ```bash
-sudo apt install -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 Se stai reinstallando la stessa identica versione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 Il file `/etc/default/reqguard` non viene sovrascritto durante l'upgrade. I nuovi default del pacchetto vengono installati come template in:
@@ -479,7 +482,7 @@ diff -u /etc/default/reqguard /usr/share/reqguard/reqguard.default
 
 e aggiungi a `/etc/default/reqguard` solo le variabili che vuoi adottare.
 
-Per la versione `0.3.21` controlla in particolare questa variabile:
+Per la versione `0.3.26` controlla in particolare questa variabile:
 
 ```bash
 REQGUARD_WEB_BAN_PORTS=80,443
@@ -724,6 +727,102 @@ q             esce
 Ctrl+C        esce senza traceback
 ```
 
+## Guida Ai Filtri
+
+I filtri si applicano in AND: se imposti IP, data e path, vengono mostrate solo le righe che rispettano tutti i filtri attivi.
+
+Valgono per entrambi i monitor:
+
+```text
+/             ricerca generale
+i             filtro IP
+d             filtro data o intervallo data
+c             filtro country
+x             elimina tutti i filtri in una sola azione
+```
+
+Solo per `monitor`:
+
+```text
+h             filtro hostname
+p             filtro porta locale
+```
+
+Solo per `web-monitor`:
+
+```text
+p             filtro path
+```
+
+Esempi filtro IP:
+
+```text
+203.0.113.10
+192.189.*
+2001:db8:*
+```
+
+Esempi filtro hostname nel `monitor`:
+
+```text
+scanner.example.com
+scanner*
+*.example.com
+```
+
+Esempi filtro porta locale nel `monitor`:
+
+```text
+80
+443
+8*
+44*
+```
+
+Esempi filtro path nel `web-monitor`:
+
+```text
+/login
+/admin*
+/api/*/login
+```
+
+Esempi date:
+
+```text
+2026-05-17
+2026-05-17 10:00:00..2026-05-17 12:00:00
+2026-05-17 10:00:00..
+..2026-05-17 12:00:00
+```
+
+Wildcard:
+
+- `*` corrisponde a zero o piu caratteri.
+- Senza `*`, i filtri IP, country e porta sono esatti.
+- Senza `*`, i filtri hostname, path e ricerca generale cercano testo contenuto.
+- Con `*`, il filtro diventa un pattern: `192.189.*` trova tutti gli IP che iniziano con `192.189.`.
+
+Esempio pratico nel `monitor`:
+
+```text
+i 192.189.*
+h *.example.com
+p 44*
+```
+
+mostra solo le connessioni da IP `192.189.*`, con hostname compatibile con `*.example.com`, verso porte locali compatibili con `44*`.
+
+Esempio pratico nel `web-monitor`:
+
+```text
+i 192.189.*
+p /api/*/login
+d 2026-05-17 10:00:00..2026-05-17 12:00:00
+```
+
+mostra solo le richieste da IP `192.189.*`, verso path compatibili con `/api/*/login`, osservate nell'intervallo indicato.
+
 ## Gestione Ban Da CLI
 
 Lista ban:
@@ -930,21 +1029,21 @@ Su una macchina Ubuntu usata come build host:
 Output:
 
 ```text
-build/deb/reqguard_0.3.21_all.deb
+build/deb/reqguard_0.3.26_all.deb
 ```
 
 Installazione:
 
 ```bash
-scp build/deb/reqguard_0.3.21_all.deb user@SERVER:/tmp/
+scp build/deb/reqguard_0.3.26_all.deb user@SERVER:/tmp/
 ssh user@SERVER
-sudo apt install -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 Se `apt` dice che e gia installato alla versione piu recente, incrementa la versione del pacchetto oppure forza la reinstallazione:
 
 ```bash
-sudo apt install --reinstall -y /tmp/reqguard_0.3.21_all.deb
+sudo apt install --reinstall -y /tmp/reqguard_0.3.26_all.deb
 ```
 
 Nota architettura: il pacchetto e `Architecture: all`, quindi e indipendente dalla CPU. Puoi usare lo stesso `.deb` su x86_64, ARM64 o ARM se il sistema e Ubuntu/Linux compatibile e dispone delle dipendenze richieste.

@@ -10,6 +10,7 @@ from .banlist import BanList
 from .config import Config
 from .enrich import CountryLookup, reverse_dns
 from .firewall import ban_ip, unban_ip
+from .matchers import matches_any_text_filter, matches_text_filter
 from .models import BanEntry, Connection
 from .procnet import read_connections
 from .stats import CountryStat, TrafficStats, build_traffic_stats
@@ -18,7 +19,7 @@ from .viewport import scroll_start_index
 
 
 TITLE = "Reqguard network monitor"
-HELP = "v/Tab view | / search | i IP | d date range | c country | x clear | s sort | b ban | u unban | q quit"
+HELP = "v/Tab view | / search | i IP | h host | p port | d date range | c country | x clear all filters | s sort | b ban | u unban | q quit"
 DETAIL_COLUMNS = "    Seen                Remote endpoint           -> Local endpoint          State       Process"
 SORT_MODES = ("arrival", "count-desc", "count-asc")
 VIEW_REQUESTS = "requests"
@@ -38,6 +39,8 @@ COLOR_ERROR = 6
 class MonitorFilterState:
     search: str = ""
     ip: str = ""
+    hostname: str = ""
+    port: str = ""
     country: str = ""
     start_at: float | None = None
     end_at: float | None = None
@@ -186,6 +189,18 @@ class MonitorApp:
                 banned_rows = self._banned_rows(groups)
                 visible_rows = self._visible_rows(groups, banned_rows)
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
+            elif key in {ord("h"), ord("H")}:
+                self._set_hostname_filter(stdscr)
+                groups = self._groups()
+                banned_rows = self._banned_rows(groups)
+                visible_rows = self._visible_rows(groups, banned_rows)
+                self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
+            elif key in {ord("p"), ord("P")}:
+                self._set_port_filter(stdscr)
+                groups = self._groups()
+                banned_rows = self._banned_rows(groups)
+                visible_rows = self._visible_rows(groups, banned_rows)
+                self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("c"), ord("C")}:
                 self._set_country_filter(stdscr)
                 groups = self._groups()
@@ -199,8 +214,7 @@ class MonitorApp:
                 visible_rows = self._visible_rows(groups, banned_rows)
                 self.selected = min(self.selected, max(len(visible_rows) - 1, 0))
             elif key in {ord("x"), ord("X")}:
-                self.filters = MonitorFilterState()
-                self.message = "filters cleared"
+                self._clear_filters()
                 groups = self._groups()
                 banned_rows = self._banned_rows(groups)
                 visible_rows = self._visible_rows(groups, banned_rows)
@@ -309,15 +323,29 @@ class MonitorApp:
         self.selected = 0
         self.message = f"view changed to {self.view_mode}"
 
+    def _clear_filters(self) -> None:
+        self.filters = MonitorFilterState()
+        self.message = "all filters cleared"
+
     def _set_search(self, stdscr: curses.window) -> None:
         value = self._prompt(stdscr, "Search IP/date/country/host/ports (empty clears): ")
         self.filters = replace(self.filters, search=value)
         self.message = f"search set to {value}" if value else "search cleared"
 
     def _set_ip_filter(self, stdscr: curses.window) -> None:
-        value = self._prompt(stdscr, "Filter exact IP (empty clears): ")
+        value = self._prompt(stdscr, "Filter IP/pattern (empty clears): ")
         self.filters = replace(self.filters, ip=value)
         self.message = f"IP filter set to {value}" if value else "IP filter cleared"
+
+    def _set_hostname_filter(self, stdscr: curses.window) -> None:
+        value = self._prompt(stdscr, "Filter hostname contains/pattern (empty clears): ")
+        self.filters = replace(self.filters, hostname=value)
+        self.message = f"hostname filter set to {value}" if value else "hostname filter cleared"
+
+    def _set_port_filter(self, stdscr: curses.window) -> None:
+        value = self._prompt(stdscr, "Filter local port (empty clears): ")
+        self.filters = replace(self.filters, port=value)
+        self.message = f"port filter set to {value}" if value else "port filter cleared"
 
     def _set_country_filter(self, stdscr: curses.window) -> None:
         value = self._prompt(stdscr, "Filter country code, e.g. US (empty clears): ").upper()
@@ -601,6 +629,10 @@ class MonitorApp:
             parts.append(f"search={self.filters.search}")
         if self.filters.ip:
             parts.append(f"ip={self.filters.ip}")
+        if self.filters.hostname:
+            parts.append(f"hostname={self.filters.hostname}")
+        if self.filters.port:
+            parts.append(f"port={self.filters.port}")
         if self.filters.country:
             parts.append(f"country={self.filters.country}")
         if self.filters.date_label:
@@ -693,7 +725,11 @@ def sort_ip_groups(groups: list[IpGroup], sort_mode: str) -> list[IpGroup]:
 
 
 def connection_matches_filters(conn: Connection, filters: MonitorFilterState) -> bool:
-    if filters.ip and conn.remote_ip != filters.ip:
+    if filters.ip and not matches_text_filter(conn.remote_ip, filters.ip):
+        return False
+    if filters.hostname and not matches_text_filter(conn.hostname or "", filters.hostname, contains=True):
+        return False
+    if filters.port and not matches_text_filter(str(conn.local_port), filters.port):
         return False
     if filters.start_at is not None and conn.observed_at < filters.start_at:
         return False
@@ -705,15 +741,14 @@ def connection_matches_filters(conn: Connection, filters: MonitorFilterState) ->
 def apply_monitor_group_filters(groups: list[IpGroup], filters: MonitorFilterState) -> list[IpGroup]:
     result = groups
     if filters.country:
-        result = [group for group in result if (group.country or "").upper() == filters.country]
+        result = [group for group in result if matches_text_filter(group.country or "", filters.country, case_sensitive=False)]
     if filters.search:
-        needle = filters.search.lower()
-        result = [group for group in result if monitor_group_matches_search(group, needle)]
+        result = [group for group in result if monitor_group_matches_search(group, filters.search)]
     return result
 
 
-def monitor_group_matches_search(group: IpGroup, needle: str) -> bool:
-    haystack = " ".join(
+def monitor_group_matches_search(group: IpGroup, pattern: str) -> bool:
+    return matches_any_text_filter(
         [
             group.ip,
             group.last_seen,
@@ -721,15 +756,21 @@ def monitor_group_matches_search(group: IpGroup, needle: str) -> bool:
             group.hostname or "",
             group.services,
             group.processes,
-        ]
-    ).lower()
-    return needle in haystack
+        ],
+        pattern,
+    )
 
 
 def banned_ip_row_matches_filters(row: BannedIpRow, filters: MonitorFilterState) -> bool:
-    if filters.ip and row.ip != filters.ip:
+    if filters.ip and not matches_text_filter(row.ip, filters.ip):
         return False
-    if filters.country and (row.country or "").upper() != filters.country:
+    if filters.hostname:
+        if row.group is None or not matches_text_filter(row.hostname or "", filters.hostname, contains=True):
+            return False
+    if filters.port:
+        if row.group is None or not any(matches_text_filter(str(conn.local_port), filters.port) for conn in row.group.connections):
+            return False
+    if filters.country and not matches_text_filter(row.country or "", filters.country, case_sensitive=False):
         return False
     if filters.start_at is not None or filters.end_at is not None:
         created_at = parse_ban_created_at(row.created_at)
@@ -742,8 +783,7 @@ def banned_ip_row_matches_filters(row: BannedIpRow, filters: MonitorFilterState)
         if filters.end_at is not None and comparable > filters.end_at:
             return False
     if filters.search:
-        needle = filters.search.lower()
-        haystack = " ".join(
+        return matches_any_text_filter(
             [
                 row.ip,
                 row.created_at,
@@ -753,9 +793,9 @@ def banned_ip_row_matches_filters(row: BannedIpRow, filters: MonitorFilterState)
                 row.hostname or "",
                 row.services,
                 row.processes,
-            ]
-        ).lower()
-        return needle in haystack
+            ],
+            filters.search,
+        )
     return True
 
 

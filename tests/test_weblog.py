@@ -126,13 +126,14 @@ def test_banned_groups_are_not_forced_to_top_by_sorting():
     ]
 
 
-def test_date_and_ip_filters_are_applied_before_grouping_counts():
+def test_path_date_and_ip_filters_are_applied_before_grouping_counts():
     events = [
         WebRequest("203.0.113.9", "GET", "/", "HTTP/1.1", "200", observed_at=100),
         WebRequest("203.0.113.9", "POST", "/login", "HTTP/1.1", "401", observed_at=200),
+        WebRequest("203.0.113.9", "POST", "/admin", "HTTP/1.1", "403", observed_at=250),
         WebRequest("198.51.100.2", "GET", "/admin", "HTTP/1.1", "404", observed_at=300),
     ]
-    filters = WebFilterState(ip="203.0.113.9", start_at=150)
+    filters = WebFilterState(ip="203.0.113.9", path="/login", start_at=150)
     filtered_events = [event for event in events if event_matches_filters(event, filters)]
     groups = build_web_groups(filtered_events, set())
 
@@ -140,6 +141,19 @@ def test_date_and_ip_filters_are_applied_before_grouping_counts():
     assert groups[0].ip == "203.0.113.9"
     assert groups[0].count == 1
     assert groups[0].top_paths == "/login(1)"
+
+
+def test_web_ip_and_path_filters_accept_wildcards():
+    events = [
+        WebRequest("192.189.1.10", "GET", "/api/v1/login", "HTTP/1.1", "200", observed_at=100),
+        WebRequest("192.189.1.11", "GET", "/api/v1/logout", "HTTP/1.1", "200", observed_at=100),
+        WebRequest("192.188.1.10", "GET", "/api/v1/login", "HTTP/1.1", "200", observed_at=100),
+    ]
+    filters = WebFilterState(ip="192.189.*", path="/api/*/login")
+
+    filtered_events = [event for event in events if event_matches_filters(event, filters)]
+
+    assert [(event.ip, event.path) for event in filtered_events] == [("192.189.1.10", "/api/v1/login")]
 
 
 def test_search_and_country_filters_match_group_fields():
@@ -163,6 +177,25 @@ def test_search_and_country_filters_match_group_fields():
     assert [group.ip for group in filtered] == ["203.0.113.9"]
 
 
+def test_web_search_filter_accepts_wildcard_patterns():
+    groups = [
+        WebGroup(
+            ip="192.189.1.10",
+            count=1,
+            requests=[WebRequest("192.189.1.10", "GET", "/login", "HTTP/1.1", "401", observed_at=100)],
+        ),
+        WebGroup(
+            ip="192.188.1.10",
+            count=1,
+            requests=[WebRequest("192.188.1.10", "GET", "/admin", "HTTP/1.1", "404", observed_at=200)],
+        ),
+    ]
+
+    filtered = apply_group_filters(groups, WebFilterState(search="192.189.*"))
+
+    assert [group.ip for group in filtered] == ["192.189.1.10"]
+
+
 def test_parse_date_range_accepts_start_and_end():
     start, end = parse_date_range("2026-05-15 01:00:00..2026-05-15 02:00:00")
 
@@ -180,3 +213,21 @@ def test_web_monitor_view_cycle_includes_stats(tmp_path):
     assert app.view_mode == VIEW_STATS
     app._toggle_view()
     assert app.view_mode == VIEW_REQUESTS
+
+
+def test_web_monitor_clear_filters_resets_path_ip_date_and_search(tmp_path):
+    app = WebMonitorApp(Config(bans_file=Path(tmp_path) / "bans.json"), log_file=Path(tmp_path) / "access.log")
+    app.filters = WebFilterState(
+        search="login",
+        ip="203.0.113.9",
+        path="/login",
+        country="US",
+        start_at=100,
+        end_at=200,
+        date_label="2026-05-15",
+    )
+
+    app._clear_filters()
+
+    assert app.filters == WebFilterState()
+    assert app.message == "all filters cleared"
